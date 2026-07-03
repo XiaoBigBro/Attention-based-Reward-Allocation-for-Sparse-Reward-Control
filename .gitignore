@@ -1,0 +1,26 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 训练产生的文件（模型、检查点）
+checkpoints/
+
+
+# 日志和结果
+*.log
+*.out
+results/
+
+# IDE 配置
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 其他
+.DS_Store
+*.zip
+*.tar.gz
