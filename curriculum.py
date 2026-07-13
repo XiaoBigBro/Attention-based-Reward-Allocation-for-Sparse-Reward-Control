@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 from collections import deque
 import numpy as np
@@ -86,7 +86,7 @@ class SlidingWindowStats:
         }
 
 # --- CurriculumEvent ---
-
+#记录事件
 @dataclass
 class CurriculumEvent:
     """课程等级变化事件"""
@@ -104,13 +104,12 @@ class AdaptiveCurriculumManager:
 
     def __init__(
         self,
-        window_size: int,
-        promote_threshold: float,
-        demote_threshold: float,
-        promote_cooldown: int,
-        demote_cooldown: int,
-        replay_interval: int,
-        auto_adjust_thresholds: bool = True,
+        window_size: int,#奖励滑动窗口大小
+        promote_threshold: float,#升级阈值
+        demote_threshold: float,#降级阈值
+        promote_cooldown: int,#升级冷却时间
+        demote_cooldown: int,#降级冷却时间
+        replay_interval: int,#回放间隔
     ):
         # 配置
         self.window_size = window_size
@@ -119,22 +118,21 @@ class AdaptiveCurriculumManager:
         self.promote_cooldown = promote_cooldown
         self.demote_cooldown = demote_cooldown
         self.replay_interval = replay_interval
-        self.auto_adjust_thresholds = auto_adjust_thresholds
 
         # 状态
-        self.current_level: int = 0
-        self.episode_count: int = 0
+        self.current_level: int = 0#当前等级
+        self.episode_count: int = 0#回合数  
         self.level_episode_counts: Dict[int, int] = {i: 0 for i in range(NUM_CURRICULUM_LEVELS)}#记录每个等级训练的回合数
 
         # 冷却（初始按升级冷却算）
         self.cooldown_remaining: int = self.promote_cooldown
-        self.since_last_change: int = 0
+        self.since_last_change: int = 0#上次等级变化到现在的回合数
 
         # 滑动窗口
         self.reward_window = SlidingWindowStats(window_size)
 
         # 事件历史
-        self.event_history: List[CurriculumEvent] = []
+        self.event_history: List[CurriculumEvent] = []#记录课程变化事件
 
         # 回放状态
         self._replay_flag: bool = False
@@ -223,49 +221,15 @@ class AdaptiveCurriculumManager:
 
         mean_reward = self.reward_window.mean()
 
-        # 获取根据等级调整后的阈值
-        promote_th = self._get_adjusted_threshold(self.promote_threshold, direction="promote")
-        demote_th = self._get_adjusted_threshold(self.demote_threshold, direction="demote")
+        # 升级：均值 >= 阈值 且 未到最高等级
+        if mean_reward >= self.promote_threshold and self.current_level < NUM_CURRICULUM_LEVELS - 1:
+            return self._promote(mean_reward, self.promote_threshold)
 
-        # 尝试升级
-        if mean_reward >= promote_th and self.current_level < NUM_CURRICULUM_LEVELS - 1:
-            return self._promote(mean_reward, promote_th)
-
-        # 尝试降级
-        if mean_reward <= demote_th and self.current_level > 0:
-            return self._demote(mean_reward, demote_th)
+        # 降级：均值 <= 阈值 且 未到最低等级
+        if mean_reward <= self.demote_threshold and self.current_level > 0:
+            return self._demote(mean_reward, self.demote_threshold)
 
         return False
-
-    def _get_adjusted_threshold(self, base_threshold: float, direction: str) -> float:
-        """
-        根据当前等级调整阈值
-
-        原理：不同等级奖励上限不同，需要按比例调整阈值
-        - 等级越高，奖励上限越大，阈值也应该越大
-        - 调整比例 = 当前等级T / 基准T（等级0的T）
-
-        示例：
-        - 等级0: T=30, 阈值 = 100
-        - 等级1: T=70, 阈值 = 100 * (70/30) = 233
-        - 等级2: T=150, 阈值 = 100 * (150/30) = 500
-        """
-        if not self.auto_adjust_thresholds:
-            return base_threshold
-
-        # 基础奖励范围（根据 CURRICULUM_PRESETS 估算）
-        # Level 0: T=30, 可能的最大连续段 ≈ 30, 奖励 ≈ 30^2 = 900
-        # Level 1: T=70, 可能 ≈ 70^2 = 4900
-        # Level 2: T=150, 可能 ≈ 150^2 = 22500
-
-        # 简化：用 T 的平方作为奖励上限的比例
-        level_T = CURRICULUM_PRESETS[self.current_level].max_episode_steps
-        base_T = CURRICULUM_PRESETS[0].max_episode_steps
-
-        # 按 T 比例调整
-        adjustment = (level_T / base_T) if direction == "promote" else (base_T / level_T)
-
-        return base_threshold * adjustment
 
     def _promote(self, mean_reward: float, threshold: float) -> bool:
         """执行升级操作。"""
@@ -359,91 +323,3 @@ class AdaptiveCurriculumManager:
     def get_event_history(self) -> List[CurriculumEvent]:
         """获取课程变化历史"""
         return list(self.event_history)
-
-# --- CurriculumTrainerWrapper ---
-
-class CurriculumTrainerWrapper:
-
-    def __init__(
-        self,
-        trainer,
-        curriculum_manager: AdaptiveCurriculumManager,
-    ):
-        self.trainer = trainer
-        self.curriculum_manager = curriculum_manager
-        self.episode = 0
-
-    def update(self) -> Dict[str, Any]:
-        """执行一次完整更新（采集 + 训练 + 课程检查）。"""
-        self.episode += 1
-
-        # 执行训练更新
-        metrics = self.trainer.update()
-
-        # 课程学习：每回合结束检查
-        # - 记录奖励到滑动窗口
-        # - 推进回放索引
-        # - 检查是否需要切换难度
-        changed = self.curriculum_manager.on_episode_end(
-            metrics.get("terminal_reward", 0.0),
-            {},
-        )
-
-        # 处理课程等级和回放
-        # 优先级：回放 > 等级变化 > 保持原等级
-        if self.curriculum_manager.should_replay():
-            # 正在回放，切换到回放等级
-            replay_level = self.curriculum_manager.get_replay_level()
-            self.trainer.env.set_curriculum_level(replay_level)
-            metrics["replay"] = True
-            metrics["replay_level"] = replay_level
-            metrics["curriculum_changed"] = False
-        elif changed:
-            # 不回放但等级变化了，切换到新等级
-            new_level = self.curriculum_manager.get_current_level()
-            self.trainer.env.set_curriculum_level(new_level)
-            metrics["replay"] = False
-            metrics["curriculum_changed"] = True
-            metrics["new_level"] = new_level
-        else:
-            # 不回放且等级没变化，回到当前课程等级（current_level）
-            current = self.curriculum_manager.get_current_level()
-            self.trainer.env.set_curriculum_level(current)
-            metrics["replay"] = False
-            metrics["curriculum_changed"] = False
-
-        # 合并课程统计
-        metrics["curriculum_stats"] = self.curriculum_manager.get_stats()
-
-        return metrics
-
-    def save(self, path: str) -> None:
-        """保存模型（包含课程状态）"""
-        self.trainer.save(path)
-
-    def load(self, path: str) -> None:
-        """加载模型"""
-        self.trainer.load(path)
-
-
-# --- wrap_trainer_with_curriculum ---
-
-def wrap_trainer_with_curriculum(trainer, **curriculum_kwargs) -> CurriculumTrainerWrapper:
-    """
-    将 PPOTrainer 包装为支持课程学习的版本
-
-    示例:
-        from ppo import PPOTrainer, DEFAULT_CONFIG
-        from curriculum import AdaptiveCurriculumManager, wrap_trainer_with_curriculum
-
-        env = make_fetch_env("FetchReach-v3", curriculum_level=0)
-        trainer = PPOTrainer(env, DEFAULT_CONFIG)
-        wrapped = wrap_trainer_with_curriculum(trainer)
-
-        for _ in range(1000):
-            metrics = wrapped.update()
-            if metrics.get("curriculum_changed"):
-                print(f"Level changed to {metrics['new_level']}")
-    """
-    curriculum_manager = AdaptiveCurriculumManager(**curriculum_kwargs)
-    return CurriculumTrainerWrapper(trainer, curriculum_manager)
