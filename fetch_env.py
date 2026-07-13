@@ -6,7 +6,7 @@ FETCH 环境改造 + 课程学习接口
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import gymnasium as gym
@@ -26,26 +26,18 @@ NUM_CURRICULUM_LEVELS = 4  # 等级 0.1.2.3
 @dataclass
 class EnvCurriculumParams:
     """控制难度的参数（单位：米）。"""
-    success_threshold: float = 0.20   # 目标区判定半径 ε
-    min_segment_length: int = 1
-    max_episode_steps: int = 150
-    target_range: float = 0.10
-    segment_scale: float = 1.0
-    reward_power: float = 1.3
-
-
-CURRICULUM_PRESETS: dict[int, EnvCurriculumParams] = {
-    0: EnvCurriculumParams(target_range=0.10, success_threshold=0.20, max_episode_steps=140, min_segment_length=1),
-    1: EnvCurriculumParams(target_range=0.15, success_threshold=0.15, max_episode_steps=110, min_segment_length=1),
-    2: EnvCurriculumParams(target_range=0.20, success_threshold=0.10, max_episode_steps=80, min_segment_length=2),
-    3: EnvCurriculumParams(target_range=0.25, success_threshold=0.05, max_episode_steps=50, min_segment_length=2),
-}
+    success_threshold: float = 0.20   #成功判定距离 d
+    min_segment_length: int = 1#奖励连续段长度小于min_segment_length的段不计算奖励
+    max_episode_steps: int = 100#最大回合步数
+    target_range: float = 0.10#目标区所在的位置范围大小
+    segment_scale: float = 1.0#奖励系数 K
+    reward_power: float = 1.3#指数奖励因子 p
 
 CURRICULUM_PRESETS = {
-    0: EnvCurriculumParams(target_range=0.10, success_threshold=0.20, max_episode_steps=140, min_segment_length=1),
-    1: EnvCurriculumParams(target_range=0.15, success_threshold=0.15, max_episode_steps=110, min_segment_length=1),
-    2: EnvCurriculumParams(target_range=0.20, success_threshold=0.10, max_episode_steps=80, min_segment_length=2),
-    3: EnvCurriculumParams(target_range=0.25, success_threshold=0.05, max_episode_steps=50, min_segment_length=2),
+    0: EnvCurriculumParams(target_range=0.10, success_threshold=0.20, max_episode_steps=100, min_segment_length=1),
+    1: EnvCurriculumParams(target_range=0.15, success_threshold=0.15, max_episode_steps=100, min_segment_length=1),
+    2: EnvCurriculumParams(target_range=0.20, success_threshold=0.10, max_episode_steps=100, min_segment_length=1),
+    3: EnvCurriculumParams(target_range=0.25, success_threshold=0.05, max_episode_steps=100, min_segment_length=1),
 }
 
 
