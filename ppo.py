@@ -1,40 +1,3 @@
-"""
-PPO 算法主体实现
-数据流: env.step() → RawTrajectoryBuffer → TrainingBuffer → 网络更新
-
-=============================================================================
-可配置超参数说明
-=============================================================================
-
-【网络结构】
-- obs_dim, action_dim         : 输入状态维数、动作维数（在 PPONetwork 创建时指定）
-- hidden_dims                 : Actor/Critic 共享隐藏层维度列表，默认 [256, 256]
-- log_std_min, log_std_max    : 策略网络 log_std 的裁剪范围，防止 std 过大/过小
-
-【GAE (Generalized Advantage Estimation)】
-- gamma : 折扣因子，默认 0.99，越大越看重远期奖励
-- lam   : GAE λ 参数，默认 0.95，越接近 1 越偏向蒙特卡洛估计，越接近 0 越偏向 TD 估计
-
-【PPO 损失】
-- clip_eps          : PPO 裁剪范围，默认 0.2，越大允许策略更新幅度越大
-- value_coef        : 价值损失权重，默认 0.5
-- entropy_coef      : 熵正则项系数，默认 0.01，越大鼓励更多探索
-- max_grad_norm     : 梯度裁剪阈值，默认 0.5，防止梯度爆炸
-
-【训练过程】
-- ppo_epochs        : 每个回合数据重复训练次数，默认 4
-- buffer_size       : 采集轨迹的最大步数，默认 200
-- tau               : 目标网络软更新系数，默认 0.005，越小更新越慢越稳定
-
-【其他】
-- device            : 计算设备，默认 "cuda"，可改为 "cpu"
-
-【熵系数衰减】
-熵系数的退火逻辑在 train_ppo_allocator.py 的 PPOTrainerWithAllocator.get_entropy_coef() 中实现：
-- 线性两阶段衰减：1.5 -> 1.0 (2000回合) -> 0.1 (12000回合)
-- 每次课程升级时重置
-"""
-
 from __future__ import annotations
 
 import numpy as np
@@ -115,10 +78,12 @@ class PPONetwork(nn.Module):
         self.target_critic = Critic(obs_dim, hidden_dims)
         self.target_critic.load_state_dict(self.critic.state_dict())
 
+#软更新
     def _soft_update_target(self, tau: float = 0.005):
         for tp, p in zip(self.target_critic.parameters(), self.critic.parameters()):
             tp.data.mul_(1.0 - tau).add_(tau * p.data)
 
+#获取动作
     def get_action(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mean, log_std = self.actor(obs)
         dist = torch.distributions.Normal(mean, log_std.exp())
@@ -326,80 +291,3 @@ def prepare_for_training(
         train_buffer.next_states.append(observations[i + 1] if i < T - 1 else observations[i])
 
     return train_buffer
-
-
-# ============================================================================
-# 策略包装器
-# ============================================================================
-
-class PolicyWrapper:
-    """将 PPONetwork 转换为采集函数"""
-    def __init__(self, network: PPONetwork, device: str = "cuda"):
-        self.network = network
-        self.device = device
-
-    def __call__(self, obs: np.ndarray) -> Tuple[np.ndarray, float, float]:
-        obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            action, log_prob, value = self.network.get_action(obs_t)
-        return action.squeeze(0).cpu().numpy(), log_prob.item(), value.item()
-
-
-# ============================================================================
-# 训练函数
-# ============================================================================
-
-def train_one_episode(
-    network: PPONetwork,
-    optimizer_actor: optim.Optimizer,
-    optimizer_critic: optim.Optimizer,
-    train_buffer: TrainingBuffer,
-    clip_eps: float = 0.2,
-    value_coef: float = 0.5,
-    entropy_coef: float = 0.01,
-    max_grad_norm: float = 0.5,
-    ppo_epochs: int = 4,
-    tau: float = 0.005,
-    device: str = "cuda",
-) -> Dict[str, float]:
-    """训练一个回合的数据"""
-    batch = train_buffer.to_tensors(device)
-    states = batch["states"]
-    actions = batch["actions"]
-    advantages = (batch["advantages"] - batch["advantages"].mean()) / (batch["advantages"].std() + 1e-8)
-    returns = batch["returns"]
-    old_log_probs = batch["old_log_probs"]
-
-    metrics = {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "total_loss": 0.0}
-
-    for _ in range(ppo_epochs):
-        # Actor 更新
-        optimizer_actor.zero_grad()
-        _, new_log_probs, _ = network.get_action(states)
-        _, log_std = network.actor(states)
-        policy_loss = compute_ppo_loss(new_log_probs, old_log_probs, advantages, clip_eps)
-        entropy_loss = compute_entropy_loss(log_std)
-        actor_loss = (policy_loss - entropy_coef * entropy_loss) / ppo_epochs
-        actor_loss.backward()
-        nn.utils.clip_grad_norm_(network.actor.parameters(), max_grad_norm)
-        optimizer_actor.step()
-
-        # Critic 更新
-        optimizer_critic.zero_grad()
-        values = network.get_value(states)
-        value_loss = compute_value_loss(values, returns) * value_coef / ppo_epochs
-        value_loss.backward()
-        nn.utils.clip_grad_norm_(network.critic.parameters(), max_grad_norm)
-        optimizer_critic.step()
-
-        metrics["policy_loss"] += policy_loss.item()
-        metrics["value_loss"] += value_loss.item()
-        metrics["entropy_loss"] += entropy_loss.item()
-        metrics["total_loss"] += (policy_loss + value_loss).item()
-
-    network._soft_update_target(tau=tau)
-
-    for k in metrics:
-        metrics[k] /= ppo_epochs
-
-    return metrics
