@@ -75,12 +75,11 @@ ALLOC_LR = 3e-4                        # 分配网络学习率
 
 # 课程学习
 CURRICULUM_WINDOW_SIZE = 50            # 计算平均奖励的窗口大小
-PROMOTE_THRESHOLD = 1000.0             # 升级阈值（平均奖励 > 此值则升级）
-DEMOTE_THRESHOLD = 10.0                # 降级阈值（平均奖励 < 此值则降级）
-PROMOTE_COOLDOWN = 1000                 # 升级冷却期（防止频繁升级）
-DEMOTE_COOLDOWN = 500                  # 降级冷却期（防止频繁降级）
+PROMOTE_THRESHOLD = 200.0              # 升级阈值（平均奖励 > 此值则升级）
+DEMOTE_THRESHOLD = 20.0                # 降级阈值（平均奖励 < 此值则降级）
+PROMOTE_COOLDOWN = 150                 # 升级冷却期（防止频繁升级）
+DEMOTE_COOLDOWN = 50                   # 降级冷却期（快速响应降级）
 REPLAY_INTERVAL = 100                   # 回放间隔（每隔多少 episode 回放一次）
-AUTO_ADJUST_THRESHOLDS = True          # 是否自动调整阈值
 
 # 训练流程
 TOTAL_EPISODES = 100000                # 总训练 episode 数
@@ -141,7 +140,6 @@ class TrainingConfig:
     curriculum_promote_cooldown: int
     curriculum_demote_cooldown: int
     curriculum_replay_interval: int
-    auto_adjust_thresholds: bool
 
     # 训练流程
     total_episodes: int
@@ -263,7 +261,6 @@ class PPOTrainerWithAllocator:
             promote_cooldown=config.curriculum_promote_cooldown,
             demote_cooldown=config.curriculum_demote_cooldown,
             replay_interval=config.curriculum_replay_interval,
-            auto_adjust_thresholds=config.auto_adjust_thresholds,
         )
 
         print("[4/5] 初始化环境...")
@@ -790,7 +787,6 @@ def main():
         curriculum_promote_cooldown=PROMOTE_COOLDOWN,
         curriculum_demote_cooldown=DEMOTE_COOLDOWN,
         curriculum_replay_interval=REPLAY_INTERVAL,
-        auto_adjust_thresholds=AUTO_ADJUST_THRESHOLDS,
         total_episodes=TOTAL_EPISODES,
         log_interval=LOG_INTERVAL,
         save_interval=SAVE_INTERVAL,
