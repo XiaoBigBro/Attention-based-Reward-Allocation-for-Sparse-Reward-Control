@@ -375,18 +375,13 @@ class PPOTrainerWithAllocator:
 
     def allocate_rewards(self, buffer: RawTrajectoryBuffer) -> np.ndarray:
         """使用奖励分配网络分配奖励"""
-        from reward_allocator import pad_sequence
-
         T = len(buffer)
         if T == 0:
             return np.array([])
 
-        # 填充序列
-        obs_padded, act_padded, mask = pad_sequence(
-            buffer.observations,
-            buffer.actions,
-            max_len=T,
-        )
+        # 转为数组 (序列长度固定，不需要 padding)
+        obs_padded = np.array(buffer.observations, dtype=np.float32)
+        act_padded = np.array(buffer.actions, dtype=np.float32)
 
         # 获取价值估计
         obs_t = torch.FloatTensor(obs_padded).to(self.device)
@@ -398,7 +393,6 @@ class PPOTrainerWithAllocator:
         weights, metrics = self.allocator_agent.allocate(
             states=obs_padded,
             actions=act_padded,
-            mask=mask,
         )
 
         # 计算分配后的奖励
@@ -540,18 +534,13 @@ class PPOTrainerWithAllocator:
         allocated_rewards: np.ndarray,
     ) -> Dict[str, float]:
         """训练奖励分配网络"""
-        from reward_allocator import pad_sequence
-
         T = len(buffer)
         if T == 0:
             return {"alloc_td_loss": 0, "alloc_entropy_loss": 0, "alloc_total_loss": 0}
 
-        # 填充序列
-        obs_padded, act_padded, mask = pad_sequence(
-            buffer.observations,
-            buffer.actions,
-            max_len=T,
-        )
+        # 转为数组 (序列长度固定，不需要 padding)
+        obs_padded = np.array(buffer.observations, dtype=np.float32)
+        act_padded = np.array(buffer.actions, dtype=np.float32)
 
         # 获取价值估计
         obs_t = torch.FloatTensor(obs_padded).to(self.device)
@@ -565,7 +554,6 @@ class PPOTrainerWithAllocator:
         metrics = self.allocator_agent.train_step(
             states=obs_padded,
             actions=act_padded,
-            mask=mask,
             terminal_reward=buffer.terminal_reward,
             gamma=self.config.gamma,
             v_online=v_online.cpu().numpy(),
