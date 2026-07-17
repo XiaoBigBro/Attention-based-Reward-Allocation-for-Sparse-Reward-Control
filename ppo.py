@@ -84,13 +84,14 @@ class PPONetwork(nn.Module):
             tp.data.mul_(1.0 - tau).add_(tau * p.data)
 
 #获取动作
-    def get_action(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def get_action(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """获取动作及相关信息"""
         mean, log_std = self.actor(obs)
         dist = torch.distributions.Normal(mean, log_std.exp())
         action = dist.rsample()
         log_prob = dist.log_prob(action).sum(dim=-1)
         value = self.critic(obs)
-        return action, log_prob, value
+        return action, log_prob, value, mean, log_std
 
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
         return self.critic(obs)
@@ -105,25 +106,35 @@ class PPONetwork(nn.Module):
 
 @dataclass
 class RawTrajectoryBuffer:
-    """存储一个完整回合的原始数据: obs, action, log_prob, value, terminal_reward"""
+    """存储一个完整回合的原始数据: obs, action, mean, log_std, log_prob, value, terminal_reward"""
     observations: List[np.ndarray] = field(default_factory=list)
     actions: List[np.ndarray] = field(default_factory=list)
+    means: List[np.ndarray] = field(default_factory=list)      # 动作分布均值
+    log_stds: List[np.ndarray] = field(default_factory=list)   # 动作分布对数标准差
     log_probs: List[float] = field(default_factory=list)
     values: List[float] = field(default_factory=list)
     terminal_reward: float = 0.0
 
-    def add(self, obs, action, log_prob, value):
+    def add(self, obs, action, mean, log_std, log_prob, value):
         self.observations.append(obs)
         self.actions.append(action)
+        self.means.append(mean)
+        self.log_stds.append(log_std)
         self.log_probs.append(log_prob)
         self.values.append(value)
 
     def finalize(self, terminal_reward: float):
         self.terminal_reward = terminal_reward
 
+    def get_action_dist(self) -> np.ndarray:
+        """返回 concat(mean, log_std) 形状 [T, action_dim * 2]"""
+        return np.concatenate([self.means, self.log_stds], axis=-1)
+
     def clear(self):
         self.observations.clear()
         self.actions.clear()
+        self.means.clear()
+        self.log_stds.clear()
         self.log_probs.clear()
         self.values.clear()
         self.terminal_reward = 0.0
@@ -245,6 +256,11 @@ def collect_trajectory(env, policy_fn, device: str = "cuda", buffer_size: int = 
         done = truncated or (len(buffer) >= buffer_size)
         obs = next_obs
 
+    # 存储最后一个 terminal 状态（用于奖励分配网络的错位对齐）
+    buffer.observations.append(obs)
+    # 添加零填充的 terminal action（保持 states 和 actions 长度一致）
+    buffer.actions.append(np.zeros_like(buffer.actions[-1]))
+
     buffer.finalize(info.get("terminal_reward", 0.0))
     return buffer
 
@@ -273,12 +289,12 @@ def prepare_for_training(
         critic_values = network.get_value(obs_tensor).squeeze(-1).cpu().numpy().tolist()
         target_values = network.get_target_value(obs_tensor).squeeze(-1).cpu().numpy().tolist()
 
-    values = critic_values + [0.0]
-    next_values = target_values[1:] + [0.0]
+    values = critic_values  # 长度 T+1 (包含 terminal 状态的价值)
+    next_values = target_values[1:] + [0.0]  # 长度 T+1
     dones = [False] * T
     dones[-1] = True
-
-    advantages, returns = compute_gae(allocated_rewards, values, next_values, dones, gamma, lam)
+    # allocated_rewards 长度 T+1，但 GAE 只用前 T 个
+    advantages, returns = compute_gae(allocated_rewards[:-1], values, next_values, dones, gamma, lam)
 
     train_buffer = TrainingBuffer()
     for i in range(T):

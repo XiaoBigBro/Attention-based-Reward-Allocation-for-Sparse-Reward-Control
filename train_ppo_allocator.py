@@ -274,15 +274,17 @@ class PPOTrainerWithAllocator:
         self.episode_count = 0
         self.step_count = 0  # 总步数统计
 
-    def _policy_fn(self, obs: np.ndarray) -> Tuple[np.ndarray, float, float]:
+    def _policy_fn(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
         """策略函数，用于采集数据"""
         obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            action, log_prob, value = self.network.get_action(obs_t)
+            action, log_prob, value, mean, log_std = self.network.get_action(obs_t)
 
         return (
             action.squeeze(0).cpu().numpy(),
+            mean.squeeze(0).cpu().numpy(),
+            log_std.squeeze(0).cpu().numpy(),
             log_prob.item(),
             value.item(),
         )
@@ -354,18 +356,26 @@ class PPOTrainerWithAllocator:
         done = False
         while not done:
             # 获取动作
-            action, log_prob, value = self._policy_fn(obs)
+            action, mean, log_std, log_prob, value = self._policy_fn(obs)
 
             # 与环境交互
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             next_obs = unpack_obs(next_obs)
 
             # 存储
-            buffer.add(obs, action, log_prob, value)
+            buffer.add(obs, action, mean, log_std, log_prob, value)
 
             # 检查结束
             done = truncated
             obs = next_obs
+
+        # 存储最后一个 terminal 状态（用于奖励分配网络的错位对齐）
+        buffer.observations.append(obs)
+        # 添加零填充的 terminal action（保持 states 和 actions 长度一致）
+        buffer.actions.append(np.zeros_like(buffer.actions[-1]))
+        # 添加零填充的 mean 和 log_std
+        buffer.means.append(np.zeros_like(buffer.means[-1]))
+        buffer.log_stds.append(np.zeros_like(buffer.log_stds[-1]))
 
         # 存储最终奖励
         terminal_reward = info.get("terminal_reward", 0.0)
@@ -382,17 +392,19 @@ class PPOTrainerWithAllocator:
         # 转为数组 (序列长度固定，不需要 padding)
         obs_padded = np.array(buffer.observations, dtype=np.float32)
         act_padded = np.array(buffer.actions, dtype=np.float32)
+        action_dist = buffer.get_action_dist().astype(np.float32)  # [T, action_dim * 2]
 
         # 获取价值估计
         obs_t = torch.FloatTensor(obs_padded).to(self.device)
         with torch.no_grad():
-            v_online = self.network.get_value(obs_t).squeeze(-1).cpu().numpy()
-            v_target_next = self.network.get_target_value(obs_t).squeeze(-1).cpu().numpy()
+            v_online = self.network.get_value(obs_t).squeeze(-1).cpu().numpy()  # [T+1]
+            v_target_next = self.network.get_target_value(obs_t).squeeze(-1).cpu().numpy()  # [T+1]
 
         # 分配奖励
         weights, metrics = self.allocator_agent.allocate(
             states=obs_padded,
             actions=act_padded,
+            action_dist=action_dist,
         )
 
         # 计算分配后的奖励
@@ -420,19 +432,21 @@ class PPOTrainerWithAllocator:
             # target_critic 的值
             target_values = self.network.get_target_value(obs_tensor).squeeze(-1).cpu().numpy().tolist()
 
-        # 构建 values 列表
-        values = critic_values + [0.0]  # V(s_1), ..., V(s_T), V(s_{T+1}=0)
-
-        # 构建 next_values (使用 target_critic)
-        next_values = target_values[1:] + [0.0]  # V_target(s_2), ..., V_target(s_T), V_target(s_{T+1}=0)
+        # 构建 values 列表（observations 现在有 T+1 个，包含 terminal 状态）
+        # values 对应 s_0 到 s_T（用于 GAE 中 s_t 的价值），长度 T+1
+        # next_values 对应 s_1 到 s_{T+1}，长度 T+1
+        # allocated_rewards 长度 T+1，但我们只需要前 T 个用于 GAE（s_0 到 s_{T-1} 的奖励）
+        values = critic_values  # 长度 T+1
+        next_values = target_values[1:] + [0.0]  # 长度 T+1
+        allocated_rewards_gae = allocated_rewards[:-1]  # 长度 T
 
         # 所有 done 都是 False（FetchReach 强制跑满 T 步，用 truncated 判断回合结束）
         # 末步的价值用 0（terminal）替代（已通过 next_values 构建好）
         dones = [False] * T
 
-        # 计算 GAE
+        # 计算 GAE（奖励长度 T，values/next_values 长度 T+1）
         advantages, returns = compute_gae(
-            allocated_rewards.tolist(),
+            allocated_rewards_gae.tolist(),
             values,
             next_values,
             dones,
@@ -545,10 +559,10 @@ class PPOTrainerWithAllocator:
         # 获取价值估计
         obs_t = torch.FloatTensor(obs_padded).to(self.device)
         with torch.no_grad():
-            v_online = self.network.get_value(obs_t).squeeze(-1)  # [T]
-            v_target = self.network.get_target_value(obs_t).squeeze(-1)  # [T]
-            # v_target_next 需要 [T+1]，在末尾添加终端状态价值 0
-            v_target_next = torch.cat([v_target, torch.zeros(1).to(self.device)], dim=0)  # [T+1]
+            v_online = self.network.get_value(obs_t).squeeze(-1)  # [T+1]
+            v_target = self.network.get_target_value(obs_t).squeeze(-1)  # [T+1]
+            # v_target_next: v_target[1:] + [0]，长度 T+1
+            v_target_next = torch.cat([v_target[1:], torch.zeros(1).to(self.device)], dim=0)
 
         # 训练分配网络
         metrics = self.allocator_agent.train_step(
