@@ -517,58 +517,65 @@ class PPOTrainerWithAllocator:
         pbar = tqdm(total=self.config.total_episodes, desc="Training")
         start_time = time.time()
 
-        for episode in range(self.config.total_episodes):
+        trained_episodes = 0  # 有效训练回合数（不含回放）
+
+        while trained_episodes < self.config.total_episodes:
+            # 检查是否需要回放
+            is_replay = self.curriculum_manager.should_replay()
+
             # 训练一个回合
             metrics = self.train_one_episode()
 
-            # 记录
-            episode_rewards.append(metrics.episode_reward)
-            terminal_rewards.append(metrics.terminal_reward)
-            curriculum_levels.append(metrics.curriculum_level)
+            # 只有非回放回合才计入有效训练
+            if not is_replay:
+                trained_episodes += 1
 
-            # 更新进度条
-            pbar.update(1)
-            pbar.set_postfix({
-                "Level": metrics.curriculum_level,
-                "TR": f"{metrics.terminal_reward:.1f}",
-                "ER": f"{metrics.episode_reward:.1f}",
-                "PPO": f"{metrics.ppo_loss:.3f}",
-                "Alloc": f"{metrics.alloc_total_loss:.3f}",
-            })
+                # 记录
+                episode_rewards.append(metrics.episode_reward)
+                terminal_rewards.append(metrics.terminal_reward)
+                curriculum_levels.append(metrics.curriculum_level)
 
-            # 日志
-            if (episode + 1) % self.config.log_interval == 0:
+                # 更新进度条
+                pbar.update(1)
+                pbar.set_postfix({
+                    "Level": metrics.curriculum_level,
+                    "TR": f"{metrics.terminal_reward:.1f}",
+                    "ER": f"{metrics.episode_reward:.1f}",
+                    "PPO": f"{metrics.ppo_loss:.3f}",
+                    "Alloc": f"{metrics.alloc_total_loss:.3f}",
+                })
+
+            # 日志（非回放时才打印，避免刷屏）
+            if not is_replay and trained_episodes % self.config.log_interval == 0:
                 avg_reward = np.mean(episode_rewards[-self.config.log_interval:])
                 current_level = self.curriculum_manager.get_current_level()
-                is_replay = self.curriculum_manager.should_replay()
-                replay_status = "是" if is_replay else "否"
                 window_mean = self.curriculum_manager.reward_window.mean() if self.curriculum_manager.reward_window.count() > 0 else 0.0
                 current_entropy_coef = self.get_entropy_coef()
 
                 # 获取当前 log_std（直接从 actor 参数）
                 log_std_mean = self.network.actor.log_std.mean().item()
 
-                pbar.write(f"[Episode {episode + 1}]")
+                pbar.write(f"[Episode {trained_episodes}]")
                 pbar.write(f"  课程等级: {current_level}")
                 pbar.write(f"  熵系数: {current_entropy_coef:.4f}, log_std: {log_std_mean:.4f}")
                 pbar.write(f"  课程回放: {replay_status}")
-                pbar.write(f"  平均最终奖励 (最近10): {avg_reward:.2f}")
+                pbar.write(f"  平均最终奖励 (最近{self.config.log_interval}): {avg_reward:.2f}")
                 pbar.write(f"  滑动缓冲区均值: {window_mean:.2f}")
                 pbar.write(f"  Actor损失: {metrics.policy_loss:.4f}")
                 pbar.write(f"  Critic损失: {metrics.value_loss:.4f}")
                 pbar.write(f"  分配网络损失: {metrics.alloc_total_loss:.4f}")
 
             # 课程升级时保存
-            if metrics.curriculum_changed == "promote":
-                save_path = f"{self.save_dir}/level_up_{episode + 1}.pt"
+            if metrics.curriculum_changed == "promote" and not is_replay:
+                save_path = f"{self.save_dir}/level_up_{trained_episodes}.pt"
                 self.save(save_path)
                 pbar.write(f"*** 课程升级! 模型已保存: {save_path} ***")
 
-            # 定时保存
-            if (episode + 1) % self.config.save_interval == 0:
-                save_path = f"{self.save_dir}/checkpoint_{episode + 1}.pt"
+            # 定时保存（非回放回合）
+            if not is_replay and trained_episodes % self.config.save_interval == 0:
+                save_path = f"{self.save_dir}/checkpoint_{trained_episodes}.pt"
                 self.save(save_path)
-                pbar.write(f"[Episode {episode + 1}] 模型已保存: {save_path}")
+                pbar.write(f"[Episode {trained_episodes}] 模型已保存: {save_path}")
 
         pbar.close()
 
