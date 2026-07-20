@@ -125,12 +125,12 @@ class MultiHeadAttention(nn.Module):
         # Causal Mask: 防止看到未来位置
         if self.use_causal_mask:
             # q_len = seq_len_q, k_len = seq_len_k
-            # 创建下三角掩码 (q_idx >= k_idx 时允许)
-            causal = torch.triu(
+            # 创建下三角掩码 (q_idx >= k_idx 时允许，即 s_t 只能看到 a_0..a_t)
+            causal = torch.tril(
                 torch.ones(seq_len_q, seq_len_k, device=query.device, dtype=torch.bool),
-                diagonal=1
+                diagonal=0
             )
-            scores = scores.masked_fill(causal, float('-inf'))
+            scores = scores.masked_fill(~causal, float('-inf'))
 
         attn_weights = F.softmax(scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
@@ -207,7 +207,8 @@ class CrossAttentionLayer(nn.Module):
         super().__init__()
 
         # 交叉注意力: Query 来自 state, Key/Value 来自 action
-        self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        # use_causal_mask=True: Q 在 t 时刻只能看到 V 的 0..t 位置（不能看未来动作）
+        self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout, use_causal_mask=use_causal_mask)
         self.norm1 = nn.LayerNorm(d_model)
 
         # 前馈网络
@@ -261,11 +262,11 @@ class RewardAllocator(nn.Module):
         action_dim: int,
         d_model: int = 64,
         num_heads: int = 4,
-        num_layers: int = 2,
-        d_ff: int = 256,
+        num_layers: int = 2,#Transformer层数
+        d_ff: int = 256,#前馈网络隐藏层维度
         dropout: float = 0.1,
-        entropy_coef: float = 0.01,
-        max_seq_len: int = 500,
+        entropy_coef: float = 0.01,#熵正则化系数
+        max_seq_len: int = 500,#最大序列长度
     ):
         super().__init__()
 
@@ -369,12 +370,10 @@ class RewardAllocator(nn.Module):
         for layer in self.cross_layers:
             fused = layer(fused, k_emb, v_emb)
 
-        # 输出权重 (softmax)
+        # 输出权重：先丢弃第一个（对应 s_0，无意义），再 softmax
         logits = self.output_proj(fused).squeeze(-1)
+        logits = logits[..., 1:]  # [T+1] → [T]
         weights = F.softmax(logits, dim=-1)
-
-        # 第一个元素归零 (无意义)
-        weights = self._zero_first_weight(weights)
 
         # 计算熵
         entropy = -(weights * torch.log(weights + 1e-8)).sum(dim=-1)
@@ -383,18 +382,7 @@ class RewardAllocator(nn.Module):
             weights = weights.squeeze(0)
             entropy = entropy.squeeze(0)
 
-        return weights, {'entropy': entropy.mean().item() if isinstance(entropy, torch.Tensor) else entropy, 'seq_len': seq_len}
-
-    def _zero_first_weight(self, weights: torch.Tensor) -> torch.Tensor:
-        """
-        将权重的第一个元素归零。
-
-        原因: weights[0] 对应 s_0（初始状态），此时还没有采取任何动作，
-        所以该位置的权重无意义，应置零。
-        """
-        weights = weights.clone()
-        weights[..., 0] = 0
-        return weights
+        return weights, {'entropy': entropy.mean().item() if isinstance(entropy, torch.Tensor) else entropy, 'seq_len': seq_len - 1}
 
     def compute_td_loss(
         self,
@@ -505,14 +493,12 @@ class RewardAllocator(nn.Module):
             fused = layer(fused[:, :actions.size(1)], k_emb, v_emb)
 
         logits = self.output_proj(fused).squeeze(-1)
+        logits = logits[..., 1:]  # 先丢弃再 softmax
         weights = F.softmax(logits, dim=-1)
-
-        # 第一个元素归零
-        weights = self._zero_first_weight(weights)
 
         entropy = -(weights * torch.log(weights + 1e-8)).sum(dim=-1)
 
-        return weights, {'entropy': entropy.mean().item() if isinstance(entropy, torch.Tensor) else entropy, 'seq_len': seq_len}
+        return weights, {'entropy': entropy.mean().item() if isinstance(entropy, torch.Tensor) else entropy, 'seq_len': seq_len - 1}
 
 
 # --- RewardAllocatorAgent ---

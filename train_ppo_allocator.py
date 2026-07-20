@@ -36,143 +36,86 @@ from reward_allocator import RewardAllocatorAgent, RewardAllocatorConfig
 # 统一配置 - 所有可调参数集中于此
 # =============================================================================
 
-# 环境
-ENV_ID = "FetchReach-v3"              # Gym 环境 ID
-SEED = 123                             # 随机数种子（用于复现实验）
-
-# PPO 网络
-HIDDEN_DIMS = [256, 128]               # Actor/Critic 隐藏层维度
-LOG_STD_MIN = -5.0                     # 策略标准差的对数下限（防止方差过小）
-LOG_STD_MAX = 2.0                      # 策略标准差的对数上限（防止方差过大）
-
-# PPO 训练
-GAMMA = 0.99                           # 折扣因子（未来奖励的重要性）
-LAM = 0.95                             # GAE 的 lambda（平衡偏差与方差）
-CLIP_EPS = 0.2                         # PPO 裁剪范围（防止策略更新过大）
-VALUE_COEF = 0.5                       # 价值损失系数
-ENTROPY_COEF = 1.5                     # 熵系数初始值（鼓励探索）
-ENTROPY_COEF_END = 0.1                 # 熵系数最终值（后期减少探索）
-ENTROPY_DECAY_MID = 2000               # 熵系数衰减到 1.0 的 episode 数
-ENTROPY_DECAY_FINAL = 12000            # 熵系数衰减到终值的 episode 数
-ACTOR_LR = 5e-4                        # 策略网络学习率
-CRITIC_LR = 1e-3                       # 价值网络学习率（通常比策略网络大）
-LR_DECAY_FINAL = 80000                 # 学习率衰减到达终值的 episode 数
-LR_END_RATIO = 0.1                     # 学习率衰减到的比例（衰减到初始值的 10%）
-PPO_EPOCHS = 6                         # 每次更新的策略网络 epoch 数
-CRITIC_UPDATES_PER_EPOCH = 2           # 每个 epoch 中价值网络更新次数（相对于策略网络）
-BATCH_SIZE = 128                       # 每次更新的 mini-batch 大小
-MAX_GRAD_NORM = 0.5                    # 梯度裁剪的最大范数
-TAU = 0.005                            # 目标网络软更新系数
-
-# 奖励分配网络
-ALLOC_D_MODEL = 64                     # Transformer 隐层维度
-ALLOC_NUM_HEADS = 4                    # 多头注意力头数
-ALLOC_NUM_LAYERS = 2                   # Transformer 层数
-ALLOC_D_FF = 256                       # 前馈网络隐层维度
-ALLOC_DROPOUT = 0.1                    # Dropout 概率
-ALLOC_ENTROPY_COEF = 0.01              # 分配网络熵系数
-ALLOC_LR = 3e-4                        # 分配网络学习率
-
-# 课程学习
-CURRICULUM_WINDOW_SIZE = 50            # 计算平均奖励的窗口大小
-PROMOTE_THRESHOLD = 200.0              # 升级阈值（平均奖励 > 此值则升级）
-DEMOTE_THRESHOLD = 20.0                # 降级阈值（平均奖励 < 此值则降级）
-PROMOTE_COOLDOWN = 150                 # 升级冷却期（防止频繁升级）
-DEMOTE_COOLDOWN = 50                   # 降级冷却期（快速响应降级）
-REPLAY_INTERVAL = 100                   # 回放间隔（每隔多少 episode 回放一次）
-
-# 训练流程
-TOTAL_EPISODES = 100000                # 总训练 episode 数
-LOG_INTERVAL = 10                      # 日志打印间隔
-SAVE_INTERVAL = 2000                   # 模型保存间隔
-SAVE_DIR = "./checkpoints/seed{seed}"  # 模型保存目录（{seed} 会替换为实际种子）
-DEVICE = "cuda:0"                      # 训练设备
-
-
-# =============================================================================
-# 数据类定义
-# =============================================================================
-
 @dataclass
 class TrainingConfig:
     """训练配置：包含所有可调超参数，供 PPOTrainerWithAllocator 使用"""
     # 环境
-    env_id: str
-    seed: int
+    env_id: str = "FetchReach-v3"
+    seed: int = 123
 
     # PPO 网络
-    hidden_dims: List[int]
-    log_std_min: float
-    log_std_max: float
+    hidden_dims: tuple = (256, 128)  # 策略网络隐藏层维度
+    log_std_min: float = -5.0#策略网络log标准差最小值
+    log_std_max: float = 2.0#策略网络log标准差最大值
 
     # PPO 训练
-    gamma: float
-    lam: float
-    clip_eps: float
-    value_coef: float
-    entropy_coef: float
-    entropy_coef_end: float
-    entropy_decay_mid: int
-    entropy_decay_final: int
-    actor_lr: float
-    critic_lr: float
-    lr_decay_final: int
-    lr_end_ratio: float
-    ppo_epochs: int
-    critic_updates_per_epoch: int
-    batch_size: int
-    max_grad_norm: float
-    tau: float
+    gamma: float = 0.99#折扣因子
+    lam: float = 0.95#GAE参数
+    clip_eps: float = 0.2#PPO裁剪参数
+    value_coef: float = 0.5#价值函数系数
+    entropy_coef: float = 1.5#熵正则化系数
+    entropy_coef_end: float = 0.1#熵正则化系数结束值
+    entropy_decay_mid: int = 2000#熵正则化系数衰减中间值
+    entropy_decay_final: int = 12000#熵正则化系数衰减最终值
+    actor_lr: float = 5e-4#策略网络学习率
+    critic_lr: float = 1e-3#价值网络学习率
+    lr_decay_final: int = 80000#学习率衰减最终回合
+    lr_end_ratio: float = 0.1#学习率衰减最终值
+    ppo_epochs: int = 6#PPO训练epochs
+    critic_updates_per_epoch: int = 2#价值网络更新次数
+    batch_size: int = 128#批量大小
+    max_grad_norm: float = 0.5#最大梯度范数
+    tau: float = 0.005#目标网络更新参数
 
     # 奖励分配网络
-    alloc_d_model: int
-    alloc_num_heads: int
-    alloc_num_layers: int
-    alloc_d_ff: int
-    alloc_dropout: float
-    alloc_entropy_coef: float
-    alloc_lr: float
+    alloc_d_model: int = 64#奖励分配网络隐藏层维度
+    alloc_num_heads: int = 4#奖励分配网络头数
+    alloc_num_layers: int = 2#奖励分配网络层数
+    alloc_d_ff: int = 256#奖励分配网络前馈网络隐藏层维度
+    alloc_dropout: float = 0.1#奖励分配网络dropout率
+    alloc_entropy_coef: float = 0.01#奖励分配网络熵正则化系数
+    alloc_lr: float = 3e-4#奖励分配网络学习率
 
     # 课程学习
-    curriculum_window_size: int
-    curriculum_promote_threshold: float
-    curriculum_demote_threshold: float
-    curriculum_promote_cooldown: int
-    curriculum_demote_cooldown: int
-    curriculum_replay_interval: int
+    curriculum_window_size: int = 50#课程学习窗口大小
+    curriculum_promote_threshold: float = 200.0#课程学习提升阈值
+    curriculum_demote_threshold: float = 20.0#课程学习降级阈值
+    curriculum_promote_cooldown: int = 150#课程学习提升冷却期
+    curriculum_demote_cooldown: int = 50#课程学习降级冷却期
+    curriculum_replay_interval: int = 100#课程学习重放间隔
 
     # 训练流程
-    total_episodes: int
-    log_interval: int
-    save_interval: int
-    save_dir: str
-    device: str
+    total_episodes: int = 100000
+    log_interval: int = 10#日志间隔
+    save_interval: int = 2000#保存间隔
+    save_dir: str = "./checkpoints/seed{seed}"#保存目录
+    device: str = "cuda:0"#设备
 
 
 @dataclass
 class TrainingMetrics:
     """训练指标：记录每个 episode 的各项损失和奖励，用于日志和绘图"""
     # 基础信息
-    episode: int = 0
-    episode_reward: float = 0.0
-    terminal_reward: float = 0.0
-    episode_length: int = 0
+    episode: int = 0#回合数
+    episode_reward: float = 0.0#回合奖励
+    terminal_reward: float = 0.0#回合结束奖励
+    episode_length: int = 0#回合长度
 
     # PPO 损失
-    policy_loss: float = 0.0
-    value_loss: float = 0.0
-    entropy_loss: float = 0.0
-    ppo_loss: float = 0.0
+    policy_loss: float = 0.0#策略网络损失
+    value_loss: float = 0.0#价值网络损失
+    entropy_loss: float = 0.0#熵正则化损失
+    ppo_loss: float = 0.0#PPO损失
 
     # 分配网络损失
-    alloc_td_loss: float = 0.0
-    alloc_entropy_loss: float = 0.0
-    alloc_total_loss: float = 0.0
+    alloc_td_loss: float = 0.0#分配网络TD损失
+    alloc_entropy_loss: float = 0.0#分配网络熵正则化损失
+    alloc_total_loss: float = 0.0#分配网络总损失
 
     # 课程学习状态
-    curriculum_level: int = 0
-    curriculum_changed: str = ""
-    learning_rate: float = 0.0
+    curriculum_level: int = 0#课程学习等级
+    curriculum_changed: str = ""#课程学习变化
+    learning_rate: float = 0.0#学习率
 
 
 # ============================================================================
@@ -728,6 +671,19 @@ class PPOTrainerWithAllocator:
         self.allocator_agent.network.load_state_dict(checkpoint["allocator"])
         self.episode_count = checkpoint["episode_count"]
 
+def set_seed(seed: int):
+    """设置所有随机数种子"""
+    import random
+    random.seed(seed)
+    import numpy as np
+    np.random.seed(seed)
+    import torch
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 # ============================================================================
 # 2. 主函数
@@ -735,66 +691,15 @@ class PPOTrainerWithAllocator:
 
 def main():
     """主函数"""
+    # 创建配置（使用默认值，可按需覆盖）
+    config = TrainingConfig()
+
     # 设置随机数种子
-    import random
-    random.seed(SEED)
-    import numpy as np
-    np.random.seed(SEED)
-    import torch
-    torch.manual_seed(SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(SEED)
-        torch.cuda.manual_seed_all(SEED)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+    set_seed(config.seed)
 
     print("=" * 60)
     print("PPO + 奖励分配网络 + 自适应课程学习")
     print("=" * 60)
-
-    # 配置
-    config = TrainingConfig(
-        env_id=ENV_ID,
-        seed=SEED,
-        hidden_dims=HIDDEN_DIMS,
-        log_std_min=LOG_STD_MIN,
-        log_std_max=LOG_STD_MAX,
-        gamma=GAMMA,
-        lam=LAM,
-        clip_eps=CLIP_EPS,
-        value_coef=VALUE_COEF,
-        entropy_coef=ENTROPY_COEF,
-        entropy_coef_end=ENTROPY_COEF_END,
-        entropy_decay_mid=ENTROPY_DECAY_MID,
-        entropy_decay_final=ENTROPY_DECAY_FINAL,
-        actor_lr=ACTOR_LR,
-        critic_lr=CRITIC_LR,
-        lr_decay_final=LR_DECAY_FINAL,
-        lr_end_ratio=LR_END_RATIO,
-        ppo_epochs=PPO_EPOCHS,
-        critic_updates_per_epoch=CRITIC_UPDATES_PER_EPOCH,
-        batch_size=BATCH_SIZE,
-        max_grad_norm=MAX_GRAD_NORM,
-        tau=TAU,
-        alloc_d_model=ALLOC_D_MODEL,
-        alloc_num_heads=ALLOC_NUM_HEADS,
-        alloc_num_layers=ALLOC_NUM_LAYERS,
-        alloc_d_ff=ALLOC_D_FF,
-        alloc_dropout=ALLOC_DROPOUT,
-        alloc_entropy_coef=ALLOC_ENTROPY_COEF,
-        alloc_lr=ALLOC_LR,
-        curriculum_window_size=CURRICULUM_WINDOW_SIZE,
-        curriculum_promote_threshold=PROMOTE_THRESHOLD,
-        curriculum_demote_threshold=DEMOTE_THRESHOLD,
-        curriculum_promote_cooldown=PROMOTE_COOLDOWN,
-        curriculum_demote_cooldown=DEMOTE_COOLDOWN,
-        curriculum_replay_interval=REPLAY_INTERVAL,
-        total_episodes=TOTAL_EPISODES,
-        log_interval=LOG_INTERVAL,
-        save_interval=SAVE_INTERVAL,
-        save_dir=SAVE_DIR,
-        device=DEVICE,
-    )
 
     # 打印关键超参数
     print("\n" + "=" * 60)

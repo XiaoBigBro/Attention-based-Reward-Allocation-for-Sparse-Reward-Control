@@ -111,7 +111,7 @@ class RawTrajectoryBuffer:
     actions: List[np.ndarray] = field(default_factory=list)
     means: List[np.ndarray] = field(default_factory=list)      # 动作分布均值
     log_stds: List[np.ndarray] = field(default_factory=list)   # 动作分布对数标准差
-    log_probs: List[float] = field(default_factory=list)
+    log_probs: List[float] = field(default_factory=list)#动作分布对数概率
     values: List[float] = field(default_factory=list)
     terminal_reward: float = 0.0
 
@@ -207,103 +207,3 @@ def compute_gae(
         returns[t] = gae + values[t]
 
     return advantages, returns
-
-
-# ============================================================================
-# PPO 损失
-# ============================================================================
-
-def compute_ppo_loss(log_probs: torch.Tensor, old_log_probs: torch.Tensor,
-                     advantages: torch.Tensor, clip_eps: float = 0.2) -> torch.Tensor:
-    """L^{CLIP}(θ) = E[min(r_t * A_t, clip(r_t, 1-ε, 1+ε) * A_t)]"""
-    ratio = torch.exp(log_probs - old_log_probs)
-    clipped = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
-    return -torch.min(ratio * advantages, clipped * advantages).mean()
-
-
-def compute_value_loss(values: torch.Tensor, returns: torch.Tensor) -> torch.Tensor:
-    """Huber 损失"""
-    return F.smooth_l1_loss(values.squeeze(-1), returns)
-
-
-def compute_entropy_loss(log_std: torch.Tensor) -> torch.Tensor:
-    """Gaussian 策略熵 H = 0.5 * log(2πe * σ²)"""
-    return -0.5 * (1 + 2 * log_std + np.log(2 * np.pi)).sum()
-
-
-# ============================================================================
-# 采集轨迹
-# ============================================================================
-
-def collect_trajectory(env, policy_fn, device: str = "cuda", buffer_size: int = 200) -> RawTrajectoryBuffer:
-    """采集一个完整回合的数据"""
-    buffer = RawTrajectoryBuffer()
-    obs, info = env.reset()
-    obs = unpack_obs(obs)
-
-    done = False
-    while not done:
-        action, log_prob, value = policy_fn(obs)
-
-        if isinstance(action, torch.Tensor):
-            action_np = action.detach().cpu().numpy()
-        else:
-            action_np = action
-
-        next_obs, _, terminated, truncated, info = env.step(action_np)
-        next_obs = unpack_obs(next_obs)
-        buffer.add(obs, action_np, log_prob, value)
-        done = truncated or (len(buffer) >= buffer_size)
-        obs = next_obs
-
-    # 存储最后一个 terminal 状态（用于奖励分配网络的错位对齐）
-    buffer.observations.append(obs)
-    # 添加零填充的 terminal action（保持 states 和 actions 长度一致）
-    buffer.actions.append(np.zeros_like(buffer.actions[-1]))
-
-    buffer.finalize(info.get("terminal_reward", 0.0))
-    return buffer
-
-
-# ============================================================================
-# 数据准备
-# ============================================================================
-
-def prepare_for_training(
-    raw_buffer: RawTrajectoryBuffer,
-    network: PPONetwork,
-    allocated_rewards: List[float],
-    device: str = "cuda",
-    gamma: float = 0.99,
-    lam: float = 0.95,
-) -> TrainingBuffer:
-    """原始轨迹 → 训练数据（含 GAE）"""
-    T = len(raw_buffer)
-    if T == 0:
-        return TrainingBuffer()
-
-    observations = raw_buffer.observations
-    obs_tensor = torch.FloatTensor(np.array(observations)).to(device)
-
-    with torch.no_grad():
-        critic_values = network.get_value(obs_tensor).squeeze(-1).cpu().numpy().tolist()
-        target_values = network.get_target_value(obs_tensor).squeeze(-1).cpu().numpy().tolist()
-
-    values = critic_values  # 长度 T+1 (包含 terminal 状态的价值)
-    next_values = target_values[1:] + [0.0]  # 长度 T+1
-    dones = [False] * T
-    dones[-1] = True
-    # allocated_rewards 长度 T+1，但 GAE 只用前 T 个
-    advantages, returns = compute_gae(allocated_rewards[:-1], values, next_values, dones, gamma, lam)
-
-    train_buffer = TrainingBuffer()
-    for i in range(T):
-        train_buffer.states.append(observations[i])
-        train_buffer.actions.append(raw_buffer.actions[i])
-        train_buffer.rewards.append(allocated_rewards[i])
-        train_buffer.advantages.append(advantages[i])
-        train_buffer.returns.append(returns[i])
-        train_buffer.old_log_probs.append(raw_buffer.log_probs[i])
-        train_buffer.next_states.append(observations[i + 1] if i < T - 1 else observations[i])
-
-    return train_buffer
