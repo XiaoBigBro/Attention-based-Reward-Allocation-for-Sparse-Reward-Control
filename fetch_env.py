@@ -61,7 +61,7 @@ def compute_terminal_reward(
 # ---------------------------------------------------------------------------
 # 3. 核心 Wrapper
 # ---------------------------------------------------------------------------
-
+#1
 class EpisodicDwellRewardWrapper(gym.Wrapper):
     """
     将 FetchReach/Push 改造为严格回合级稀疏奖励。
@@ -207,7 +207,7 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
 # ---------------------------------------------------------------------------
 # 5. 环境工厂
 # ---------------------------------------------------------------------------
-
+#1
 def make_fetch_env(
     env_id: str = "FetchReach-v3",
     curriculum_level: int = 0,
@@ -232,8 +232,7 @@ def make_fetch_env(
     base_env = gym.make(env_id, render_mode=render_mode, max_episode_steps=10000)
     wrapped = EpisodicDwellRewardWrapper(base_env, curriculum_level)
     return wrapped
-
-
+#1
 def get_env_obs_dim(env_id: str) -> int:
     """查询环境的观测维度（不创建渲染窗口）。"""
     dummy = gym.make(env_id, render_mode=None)
@@ -243,8 +242,7 @@ def get_env_obs_dim(env_id: str) -> int:
     finally:
         dummy.close()
     return dim
-
-
+#1
 def get_env_action_dim(env_id: str) -> int:
     """查询环境的动作维度（不创建渲染窗口）。"""
     dummy = gym.make(env_id, render_mode=None)

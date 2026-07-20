@@ -14,15 +14,9 @@ import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
 
-import ppo
-import curriculum
-import fetch_env
-import reward_allocator
 from curriculum import AdaptiveCurriculumManager
-from fetch_env import make_fetch_env, EnvCurriculumParams, CURRICULUM_PRESETS, get_env_obs_dim, get_env_action_dim
+from fetch_env import make_fetch_env, get_env_obs_dim, get_env_action_dim
 from ppo import (
-    Actor,
-    Critic,
     PPONetwork,
     RawTrajectoryBuffer,
     TrainingBuffer,
@@ -44,26 +38,22 @@ class TrainingConfig:
     seed: int = 123
 
     # PPO 网络
-    hidden_dims: tuple = (256, 128)  # 策略网络隐藏层维度
+    hidden_dims: List[int] = [256, 128]  # 策略网络隐藏层维度
     log_std_min: float = -5.0#策略网络log标准差最小值
     log_std_max: float = 2.0#策略网络log标准差最大值
+    log_std_init: float = 2.0#策略网络log标准差初始值
 
     # PPO 训练
     gamma: float = 0.99#折扣因子
     lam: float = 0.95#GAE参数
     clip_eps: float = 0.2#PPO裁剪参数
     value_coef: float = 0.5#价值函数系数
-    entropy_coef: float = 1.5#熵正则化系数
-    entropy_coef_end: float = 0.1#熵正则化系数结束值
-    entropy_decay_mid: int = 2000#熵正则化系数衰减中间值
-    entropy_decay_final: int = 12000#熵正则化系数衰减最终值
-    actor_lr: float = 5e-4#策略网络学习率
-    critic_lr: float = 1e-3#价值网络学习率
-    lr_decay_final: int = 80000#学习率衰减最终回合
-    lr_end_ratio: float = 0.1#学习率衰减最终值
+    entropy_coef: float = 1.5  # 熵正则化系数
+    actor_lr: float = 5e-4  # 策略网络学习率
+    critic_lr: float = 1e-3  # 价值网络学习率
     ppo_epochs: int = 6#PPO训练epochs
     critic_updates_per_epoch: int = 2#价值网络更新次数
-    batch_size: int = 128#批量大小
+    batch_size: int = 128#训练的时候采样的批量大小
     max_grad_norm: float = 0.5#最大梯度范数
     tau: float = 0.005#目标网络更新参数
 
@@ -88,7 +78,7 @@ class TrainingConfig:
     total_episodes: int = 100000
     log_interval: int = 10#日志间隔
     save_interval: int = 2000#保存间隔
-    save_dir: str = "./checkpoints/seed{seed}"#保存目录
+    save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
     device: str = "cuda:0"#设备
 
 
@@ -137,7 +127,7 @@ class PPOTrainerWithAllocator:
     def __init__(self, config: TrainingConfig):
         self.config = config
 
-        # 解析 save_dir 中的 {seed} 占位符
+        # 只有显式调用 .format() 时，才会被替换，否则只是普通的字符串
         save_dir = config.save_dir.format(seed=config.seed)
         self.save_dir = save_dir
 
@@ -147,15 +137,9 @@ class PPOTrainerWithAllocator:
         with open(self.rewards_file, 'w') as f:
             f.write("episode,terminal_reward,curriculum_level\n")
 
-        # 熵系数衰减状态（每个课程等级独立衰减）
-        self._entropy_coef = config.entropy_coef
-        self._entropy_start_episode = 0  # 当前等级的起始回合
-        self._last_curriculum_level = 0  # 上一次的课程等级
-
         # 创建设备
         self.device = torch.device(config.device)
-        print(f"使用设备: {self.device}")
-
+        
         # 自动查询环境维度（不创建渲染窗口）
         obs_dim = get_env_obs_dim(config.env_id)
         action_dim = get_env_action_dim(config.env_id)
@@ -168,6 +152,7 @@ class PPOTrainerWithAllocator:
             hidden_dims=config.hidden_dims,
             log_std_min=config.log_std_min,
             log_std_max=config.log_std_max,
+            log_std_init=config.log_std_init,
         ).to(self.device)
 
         # 优化器（策略和价值网络分开设置学习率）
@@ -179,8 +164,6 @@ class PPOTrainerWithAllocator:
             self.network.critic.parameters(),
             lr=config.critic_lr,
         )
-
-        # 学习率调度器 (暂时停用)
 
         print("[2/5] 初始化奖励分配网络...")
         alloc_config = RewardAllocatorConfig(
@@ -233,61 +216,12 @@ class PPOTrainerWithAllocator:
         )
 
     def get_entropy_coef(self) -> float:
-        """
-        获取当前衰减后的熵系数（线性衰减）
-
-        衰减曲线（基于配置中的实际值）：
-        - 0 回合:              entropy = entropy_coef (1.5)
-        - entropy_decay_mid:    entropy = 1.0 (中间值)
-        - entropy_decay_final:  entropy = entropy_coef_end (0.1)
-        - 每次课程升级重置
-        """
-        episodes_in_level = self.episode_count - self._entropy_start_episode
-
-        if episodes_in_level <= 0:
-            return self.config.entropy_coef
-
-        if episodes_in_level >= self.config.entropy_decay_final:
-            return self.config.entropy_coef_end
-
-        mid_entropy = 1.0  # 中间锚点
-
-        if episodes_in_level <= self.config.entropy_decay_mid:
-            progress = episodes_in_level / self.config.entropy_decay_mid
-            return self.config.entropy_coef + (mid_entropy - self.config.entropy_coef) * progress
-        else:
-            progress = (episodes_in_level - self.config.entropy_decay_mid) / \
-                       (self.config.entropy_decay_final - self.config.entropy_decay_mid)
-            return mid_entropy + (self.config.entropy_coef_end - mid_entropy) * progress
+        """获取熵系数（固定值）"""
+        return self.config.entropy_coef
 
     def get_lr(self) -> Tuple[float, float]:
-        """
-        获取当前衰减后的学习率（线性衰减，不重置）
-
-        衰减曲线：
-        - 0 回合:              lr = initial_lr
-        - lr_decay_final:      lr = initial_lr * lr_end_ratio
-        - 课程升级时不重置（全局衰减）
-        """
-        if self.episode_count >= self.config.lr_decay_final:
-            return (
-                self.config.actor_lr * self.config.lr_end_ratio,
-                self.config.critic_lr * self.config.lr_end_ratio,
-            )
-
-        progress = self.episode_count / self.config.lr_decay_final
-        return (
-            self.config.actor_lr * (1 - (1 - self.config.lr_end_ratio) * progress),
-            self.config.critic_lr * (1 - (1 - self.config.lr_end_ratio) * progress),
-        )
-
-    def update_lr(self):
-        """更新优化器的学习率"""
-        actor_lr, critic_lr = self.get_lr()
-        for param_group in self.optimizer_actor.param_groups:
-            param_group['lr'] = actor_lr
-        for param_group in self.optimizer_critic.param_groups:
-            param_group['lr'] = critic_lr
+        """获取学习率（固定值）"""
+        return (self.config.actor_lr, self.config.critic_lr)
 
     def collect_trajectory(self) -> RawTrajectoryBuffer:
         """采集一个回合的轨迹"""
@@ -547,12 +481,6 @@ class PPOTrainerWithAllocator:
 
         if curriculum_changed:
             self.env.set_curriculum_level(current_level)
-            # 课程升级时重置熵系数衰减
-            self._entropy_start_episode = self.episode_count
-            self._last_curriculum_level = current_level
-
-        # 7. 学习率衰减
-        self.update_lr()
 
         # 构建指标
         metrics = TrainingMetrics(
@@ -581,11 +509,11 @@ class PPOTrainerWithAllocator:
         print("=" * 60)
 
         # 统计
-        episode_rewards = []
-        terminal_rewards = []
-        curriculum_levels = []
+        episode_rewards = []#回合奖励
+        terminal_rewards = []#最终奖励
+        curriculum_levels = []#课程等级
 
-        # 主循环
+        # 主循环，会在终端中显示一个动态进度条
         pbar = tqdm(total=self.config.total_episodes, desc="Training")
         start_time = time.time()
 
@@ -671,6 +599,10 @@ class PPOTrainerWithAllocator:
         self.allocator_agent.network.load_state_dict(checkpoint["allocator"])
         self.episode_count = checkpoint["episode_count"]
 
+# ============================================================================
+# 2. 随机数种子设置
+# ============================================================================
+
 def set_seed(seed: int):
     """设置所有随机数种子"""
     import random
@@ -686,17 +618,10 @@ def set_seed(seed: int):
         torch.backends.cudnn.benchmark = False
 
 # ============================================================================
-# 2. 主函数
+# 3. 打印训练配置
 # ============================================================================
-
-def main():
-    """主函数"""
-    # 创建配置（使用默认值，可按需覆盖）
-    config = TrainingConfig()
-
-    # 设置随机数种子
-    set_seed(config.seed)
-
+def print_config(config: TrainingConfig):
+    """打印训练配置"""
     print("=" * 60)
     print("PPO + 奖励分配网络 + 自适应课程学习")
     print("=" * 60)
@@ -708,7 +633,6 @@ def main():
     print(f"  PPO:")
     print(f"    策略网络学习率:       {config.actor_lr}")
     print(f"    价值网络学习率:       {config.critic_lr}")
-    print(f"    学习率衰减:          {config.actor_lr} -> {config.actor_lr * config.lr_end_ratio:.2e} ({config.lr_decay_final} 回合)")
     print(f"    熵系数:              {config.entropy_coef}")
     print(f"    ppo_epochs:          {config.ppo_epochs}")
     print(f"    critic_updates:      {config.critic_updates_per_epoch} 次/epoch (共 {config.ppo_epochs * config.critic_updates_per_epoch} 次)")
@@ -718,7 +642,6 @@ def main():
     print(f"    clip_eps:            {config.clip_eps}")
     print(f"    value_coef:          {config.value_coef}")
     print(f"    max_grad_norm:       {config.max_grad_norm}")
-    print(f"    entropy_coef:        {config.entropy_coef} -> {config.entropy_coef_end} (衰减: {config.entropy_decay_mid}回合到1.0, {config.entropy_decay_final}回合到{config.entropy_coef_end})")
     print(f"  奖励分配网络:")
     print(f"    学习率:              {config.alloc_lr}")
     print(f"    熵系数:              {config.alloc_entropy_coef}")
@@ -735,14 +658,29 @@ def main():
     print(f"  训练:")
     print(f"    total_episodes:      {config.total_episodes}")
     print(f"    seed:                {config.seed}")
+    print(f"    cuda_device:         {config.device}")
     print("=" * 60)
+
+# ============================================================================
+# 2. 主函数
+# ============================================================================
+
+def main():
+    """主函数"""
+    # 创建配置
+    config = TrainingConfig()
+
+    # 设置随机数种子
+    set_seed(config.seed)
+
+    # 打印配置
+    print_config(config)
 
     # 创建训练器
     trainer = PPOTrainerWithAllocator(config)
 
     # 开始训练
     trainer.train()
-
 
 if __name__ == "__main__":
     main()

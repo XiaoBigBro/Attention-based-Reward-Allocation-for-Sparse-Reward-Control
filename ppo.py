@@ -26,11 +26,11 @@ def unpack_obs(obs: dict) -> np.ndarray:
 # ============================================================================
 # 网络
 # ============================================================================
-
+#1
 class Actor(nn.Module):
     """Gaussian 策略网络，输出 mean 和 log_std"""
     def __init__(self, obs_dim: int, action_dim: int, hidden_dims: List[int],
-                 log_std_min: float, log_std_max: float):
+                 log_std_min: float, log_std_max: float, log_std_init: float):
         super().__init__()
         layers = []
         prev_dim = obs_dim
@@ -39,7 +39,7 @@ class Actor(nn.Module):
             prev_dim = dim
         self.net = nn.Sequential(*layers)
         self.mean = nn.Linear(prev_dim, action_dim)
-        self.log_std = nn.Parameter(torch.ones(action_dim) * 2.0)
+        self.log_std = nn.Parameter(torch.ones(action_dim) * log_std_init)
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
 
@@ -49,7 +49,7 @@ class Actor(nn.Module):
         log_std = torch.clamp(self.log_std, self.log_std_min, self.log_std_max)
         return mean, log_std
 
-
+#1
 class Critic(nn.Module):
     """状态价值网络 V(s)"""
     def __init__(self, obs_dim: int, hidden_dims: List[int]):
@@ -65,25 +65,25 @@ class Critic(nn.Module):
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         return self.value_head(self.net(obs))
 
-
+#1
 class PPONetwork(nn.Module):
     """Actor-Critic 整合网络，含 target_critic 软更新"""
     def __init__(self, obs_dim: int, action_dim: int, hidden_dims: List[int],
-                 log_std_min: float, log_std_max: float):
+                 log_std_min: float, log_std_max: float, log_std_init: float):
         super().__init__()
         self.obs_dim = obs_dim
         self.action_dim = action_dim
-        self.actor = Actor(obs_dim, action_dim, hidden_dims, log_std_min, log_std_max)
+        self.actor = Actor(obs_dim, action_dim, hidden_dims, log_std_min, log_std_max, log_std_init)
         self.critic = Critic(obs_dim, hidden_dims)
         self.target_critic = Critic(obs_dim, hidden_dims)
         self.target_critic.load_state_dict(self.critic.state_dict())
 
-#软更新
+    #软更新
     def _soft_update_target(self, tau: float = 0.005):
         for tp, p in zip(self.target_critic.parameters(), self.critic.parameters()):
             tp.data.mul_(1.0 - tau).add_(tau * p.data)
 
-#获取动作
+    #获取动作
     def get_action(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """获取动作及相关信息"""
         mean, log_std = self.actor(obs)

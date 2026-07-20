@@ -19,7 +19,7 @@ from fetch_env import (
 
 
 # --- SlidingWindowStats ---
-
+#1
 class SlidingWindowStats:
     """固定大小的滑动窗口，自动计算统计量。"""
 
@@ -98,7 +98,7 @@ class CurriculumEvent:
     reward_threshold: float
 
 # --- AdaptiveCurriculumManager ---
-
+#1
 class AdaptiveCurriculumManager:
     """基于滑动窗口奖励的自动课程学习（升降级 + 回放）。"""
 
