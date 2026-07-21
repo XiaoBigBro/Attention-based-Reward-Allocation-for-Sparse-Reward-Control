@@ -106,12 +106,23 @@ class PPONetwork(nn.Module):
 
 @dataclass
 class RawTrajectoryBuffer:
-    """存储一个完整回合的原始数据: obs, action, mean, log_std, log_prob, value, terminal_reward"""
+    """
+    存储一个完整回合的原始数据。
+
+    长度约定（episode 共 N 个 transition，observations 共 N+1 个）:
+        observations: N + 1  (s_0 ... s_N，包含 terminal state)
+        actions:      N + 1  (shifted: [zeros] + [a_0 ... a_{N-1}])
+        means:        N + 1
+        log_stds:     N + 1
+        log_probs:    N      (每个 transition 的 log π(a_t | s_t))
+        values:       N      (每个 transition 的 V(s_t))
+        terminal_reward: 标量
+    """
     observations: List[np.ndarray] = field(default_factory=list)
     actions: List[np.ndarray] = field(default_factory=list)
-    means: List[np.ndarray] = field(default_factory=list)      # 动作分布均值
-    log_stds: List[np.ndarray] = field(default_factory=list)   # 动作分布对数标准差
-    log_probs: List[float] = field(default_factory=list)#动作分布对数概率
+    means: List[np.ndarray] = field(default_factory=list)
+    log_stds: List[np.ndarray] = field(default_factory=list)
+    log_probs: List[float] = field(default_factory=list)
     values: List[float] = field(default_factory=list)
     terminal_reward: float = 0.0
 
@@ -127,8 +138,13 @@ class RawTrajectoryBuffer:
         self.terminal_reward = terminal_reward
 
     def get_action_dist(self) -> np.ndarray:
-        """返回 concat(mean, log_std) 形状 [T, action_dim * 2]"""
+        """返回 concat(mean, log_std)，形状 [N+1, action_dim * 2]（shifted）"""
         return np.concatenate([self.means, self.log_stds], axis=-1)
+
+    @property
+    def transition_count(self) -> int:
+        """实际 transition 数（observations 数减 1）"""
+        return len(self.observations) - 1
 
     def clear(self):
         self.observations.clear()
@@ -138,14 +154,18 @@ class RawTrajectoryBuffer:
         self.log_probs.clear()
         self.values.clear()
         self.terminal_reward = 0.0
-    #以双下划线 __ 开头和结尾的方法是特殊方法，用于重载某些操作符或函数
+
     def __len__(self) -> int:
         return len(self.observations)
 
 
 @dataclass
 class TrainingBuffer:
-    """存储训练数据: s_t, a_t, r_t, s_{t+1}, log_prob, advantage, returns"""
+    """
+    存储一个 episode 的 N 个 transition 的训练数据。
+
+    长度约定: states/actions/next_states/rewards/advantages/returns/old_log_probs 全部为 N
+    """
     states: List[np.ndarray] = field(default_factory=list)
     actions: List[np.ndarray] = field(default_factory=list)
     next_states: List[np.ndarray] = field(default_factory=list)
@@ -154,6 +174,13 @@ class TrainingBuffer:
     returns: List[float] = field(default_factory=list)
     old_log_probs: List[float] = field(default_factory=list)
     terminal_reward: float = 0.0
+
+    def _check_consistency(self):
+        """检查所有 per-transition 字段长度是否一致"""
+        N = len(self.states)
+        for field_name in ['actions', 'next_states', 'rewards', 'advantages', 'returns', 'old_log_probs']:
+            actual = len(getattr(self, field_name))
+            assert actual == N, f"{field_name} length {actual} != states length {N}"
 
     def __len__(self) -> int:
         return len(self.states)
@@ -196,8 +223,13 @@ def compute_gae(
     δ_t = r_t + γ * V(s_{t+1}) - V(s_t)
     A_t = δ_t + γλ * A_{t+1}
     G_t = A_t + V(s_t)
+    所有输入长度必须一致: rewards, values, next_values, dones
     """
-    T = len(values)
+    T = len(rewards)
+    assert len(values) == T, f"values length {len(values)} != rewards length {T}"
+    assert len(next_values) == T, f"next_values length {len(next_values)} != rewards length {T}"
+    assert len(dones) == T, f"dones length {len(dones)} != rewards length {T}"
+
     advantages = [0.0] * T
     returns = [0.0] * T
 

@@ -4,7 +4,7 @@ PPO + 奖励分配网络 + 自适应课程学习 完整训练脚本
 
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -38,7 +38,7 @@ class TrainingConfig:
     seed: int = 123
 
     # PPO 网络
-    hidden_dims: List[int] = [256, 128]  # 策略网络隐藏层维度
+    hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -5.0#策略网络log标准差最小值
     log_std_max: float = 2.0#策略网络log标准差最大值
     log_std_init: float = 2.0#策略网络log标准差初始值
@@ -79,7 +79,7 @@ class TrainingConfig:
     log_interval: int = 10#日志间隔
     save_interval: int = 2000#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
-    device: str = "cuda:0"#设备
+    device: str = "cpu"  # 设备
 
 
 @dataclass
@@ -261,20 +261,18 @@ class PPOTrainerWithAllocator:
 
     def allocate_rewards(self, buffer: RawTrajectoryBuffer) -> np.ndarray:
         """使用奖励分配网络分配奖励"""
-        T = len(buffer)#长度为T+1
+        T = len(buffer)  # 长度为 N+1
         if T == 0:
             return np.array([])
 
         # 转为数组 (序列长度固定，不需要 padding)
         obs_padded = np.array(buffer.observations, dtype=np.float32)
         act_padded = np.array(buffer.actions, dtype=np.float32)
-        action_dist = buffer.get_action_dist().astype(np.float32)  # [T+1, action_dim * 2]
 
-        # 分配奖励
+        # 分配奖励（不传 action_dist，保持训练/推理一致）
         weights, metrics = self.allocator_agent.allocate(
             states=obs_padded,
             actions=act_padded,
-            action_dist=action_dist,
         )
 
         # 计算分配后的奖励
@@ -289,53 +287,53 @@ class PPOTrainerWithAllocator:
         allocated_rewards: np.ndarray,
     ) -> TrainingBuffer:
         """计算 GAE 并构建训练缓冲区"""
-        T = len(buffer)
-        if T == 0:
+        # 实际 transition 数 N (observations 有 N+1 个，包含 terminal state)
+        N = len(buffer.observations) - 1
+        if N == 0:
             return TrainingBuffer()
 
-        observations = buffer.observations#长度为T+1
-        obs_tensor = torch.FloatTensor(np.array(observations)).to(self.device)
+        observations = buffer.observations  # 长度 N+1: s_0, ..., s_N
 
+        # 重新计算价值（使用 observations 序列）
+        obs_tensor = torch.FloatTensor(np.array(observations)).to(self.device)
         with torch.no_grad():
-            # Critic 的值
             critic_values = self.network.get_value(obs_tensor).squeeze(-1).cpu().numpy().tolist()
-            # target_critic 的值
             target_values = self.network.get_target_value(obs_tensor).squeeze(-1).cpu().numpy().tolist()
 
-        # 构建 values 列表（observations 现在有 T+1 个，包含 terminal 状态）
-        # values 对应 s_0 到 s_T（用于 GAE 中 s_t 的价值），长度 T+1
-        # next_values 对应 s_1 到 s_{T+1}，长度 T+1
-        # allocated_rewards 长度 T+1，但我们只需要前 T 个用于 GAE（s_0 到 s_{T-1} 的奖励）
-        values = critic_values  # 长度 T+1
-        next_values = target_values[1:] + [0.0]  # 长度 T
+        # GAE 的正确长度关系 (都是 N):
+        # values:     V(s_0), V(s_1), ..., V(s_{N-1})      -> critic_values[:-1]
+        # next_values: V(s_1), V(s_2), ..., V(s_N)           -> target_values[1:]
+        # rewards:    r_0,    r_1,    ..., r_{N-1}           -> allocated_rewards
+        # dones:      False,  ...,    False, True            -> 最后一步是 terminal
+        values = critic_values[:-1]  # 长度 N
+        next_values = target_values[1:]  # 长度 N
+        dones = [False] * (N - 1) + [True]  # 长度 N
 
-        # 所有 done 都是 False（FetchReach 强制跑满 T 步，用 truncated 判断回合结束）
-        # 末步的价值用 0（terminal）替代（已通过 next_values 构建好）
-        dones = [False] * (T - 1) + [True]  # 最后一个为 True，长度为T
-
-        # 计算 GAE（奖励长度 T，values/next_values 长度 T+1）
+        # 计算 GAE（所有输入长度必须一致为 N）
         advantages, returns = compute_gae(
-            allocated_rewards.tolist(),#长度为T
-            values,#长度为T+1
-            next_values,#长度为T
-            dones,#长度为T
+            allocated_rewards.tolist(),  # 长度 N
+            values,  # 长度 N
+            next_values,  # 长度 N
+            dones,  # 长度 N
             self.config.gamma,
             self.config.lam,
         )
 
-        # 构建训练缓冲区
+        # 构建训练缓冲区（长度为 N）
         train_buffer = TrainingBuffer()
         train_buffer.terminal_reward = buffer.terminal_reward
 
-        for i in range(T):
-            train_buffer.states.append(observations[i])
-            train_buffer.actions.append(buffer.actions[i+1])
-            train_buffer.rewards.append(allocated_rewards[i])
+        for i in range(N):
+            train_buffer.states.append(observations[i])  # s_i
+            train_buffer.actions.append(buffer.actions[i + 1])  # a_i (shifted)
+            train_buffer.rewards.append(allocated_rewards[i])  # r_i
             train_buffer.advantages.append(advantages[i])
             train_buffer.returns.append(returns[i])
-            train_buffer.old_log_probs.append(buffer.log_probs[i])
-            train_buffer.next_states.append(observations[i + 1])
-            
+            train_buffer.old_log_probs.append(buffer.log_probs[i])  # log π(a_i|s_i)
+            train_buffer.next_states.append(observations[i + 1])  # s_{i+1}
+
+        # 长度一致性检查
+        train_buffer._check_consistency()
 
         return train_buffer
 
@@ -414,28 +412,34 @@ class PPOTrainerWithAllocator:
         train_buffer: TrainingBuffer,
         critic_network,
     ) -> Dict[str, float]:
-        """训练奖励分配网络
-
-        使用 TrainingBuffer 中的数据，构造 T+1 个 states 和 T 个 actions
-        """
-        T = len(train_buffer)
+        """训练奖励分配网络"""
+        T = len(train_buffer)  # N 个 transition
         if T == 0:
             return {"alloc_td_loss": 0, "alloc_entropy_loss": 0, "alloc_total_loss": 0}
 
-        # 构造 T+1 个 states: [s_0, s_1, ..., s_{T-1}] + [s_T]
+        # 构造 N+1 个 states: [s_0, ..., s_{N-1}] + [s_N]
         states_list = list(train_buffer.states) + [train_buffer.next_states[-1]]
         states_padded = np.array(states_list, dtype=np.float32)
 
-        # 构造 T 个 actions: [zeros] + [a_0, a_1, ..., a_{T-1}]
+        # 构造 N+1 个 shifted actions: [zeros] + [a_0, ..., a_{N-1}]
         actions_list = [np.zeros_like(train_buffer.actions[0])] + list(train_buffer.actions)
         actions_padded = np.array(actions_list, dtype=np.float32)
 
-        # 获取价值估计
+        # 获取价值估计（长度为 N+1）
         obs_t = torch.FloatTensor(states_padded).to(self.device)
         with torch.no_grad():
-            v_online = critic_network.get_value(obs_t).squeeze(-1)  # [T+1]
-            v_target = critic_network.get_target_value(obs_t).squeeze(-1)  # [T+1]
-            v_target_next = torch.cat([v_target[1:], torch.zeros(1).to(self.device)], dim=0)
+            v_all = critic_network.get_value(obs_t).squeeze(-1)  # [N+1]: V(s_0)...V(s_N)
+            v_target_all = critic_network.get_target_value(obs_t).squeeze(-1)  # [N+1]
+
+        # allocator 前向输出 weights 为 N（position 1...N 对应 transition 0...N-1）
+        # TD target 使用对应位置的 value: V(s_1)...V(s_N)
+        v_online = v_all[1:].cpu().numpy()  # [N]
+        v_target_next = v_target_all[1:].cpu().numpy()  # [N]，最后一步 V(s_N) 用于 bootstrap
+
+        # DEBUG: log shapes before calling train_step
+        import sys
+        with open("debug-03c78f.log", "a") as f:
+            f.write(f'{{"msg":"train_allocator_step","T":"{T}","states_shape":"{states_padded.shape}","actions_shape":"{actions_padded.shape}","v_all_shape":"{v_all.shape}","v_all_np":"{v_all.shape}","v_online":"{v_online.shape}","v_target_next":"{v_target_next.shape}"}}\n')
 
         # 训练分配网络
         metrics = self.allocator_agent.train_step(
@@ -443,8 +447,8 @@ class PPOTrainerWithAllocator:
             actions=actions_padded,
             terminal_reward=train_buffer.terminal_reward,
             gamma=self.config.gamma,
-            v_online=v_online.cpu().numpy(),
-            v_target_next=v_target_next.cpu().numpy(),
+            v_online=v_online,
+            v_target_next=v_target_next,
         )
 
         return {
@@ -459,7 +463,7 @@ class PPOTrainerWithAllocator:
         raw_buffer = self.collect_trajectory()
 
         # 2. 奖励分配
-        allocated_rewards = self.allocate_rewards(raw_buffer)#长度为T
+        allocated_rewards = self.allocate_rewards(raw_buffer)
 
         # 3. 计算 GAE 并构建训练缓冲区
         train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards)
@@ -483,7 +487,7 @@ class PPOTrainerWithAllocator:
             episode=self.episode_count,
             episode_reward=sum(allocated_rewards) if len(allocated_rewards) > 0 else 0,
             terminal_reward=terminal_reward,
-            episode_length=len(raw_buffer),
+            episode_length=len(raw_buffer) - 1,  # observations 有 N+1 个，transition 数为 N
             curriculum_level=current_level,
             curriculum_changed=curriculum_changed,
             learning_rate=self.get_lr()[0],
