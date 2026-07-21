@@ -562,14 +562,14 @@ class RewardAllocatorAgent:
 
         输入:
             states: [T+1, obs_dim]
-            actions: [T, action_dim]
-            action_dist: [T, action_dim * 2] (可选, 包含 mean + log_std)
+            actions: [T+1, action_dim]
+            action_dist: [T+1, action_dim * 2] (可选, 包含 mean + log_std)
 
         输出:
             weights: [T]
             metrics: dict
         """
-        self.network.eval()
+        self.network.eval()#评估模式
         with torch.no_grad():
             states_t = torch.FloatTensor(states).to(self.device)
             actions_t = torch.FloatTensor(actions).to(self.device)

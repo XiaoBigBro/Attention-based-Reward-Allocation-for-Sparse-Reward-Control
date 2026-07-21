@@ -138,7 +138,7 @@ class RawTrajectoryBuffer:
         self.log_probs.clear()
         self.values.clear()
         self.terminal_reward = 0.0
-
+    #以双下划线 __ 开头和结尾的方法是特殊方法，用于重载某些操作符或函数
     def __len__(self) -> int:
         return len(self.observations)
 
@@ -153,6 +153,7 @@ class TrainingBuffer:
     advantages: List[float] = field(default_factory=list)
     returns: List[float] = field(default_factory=list)
     old_log_probs: List[float] = field(default_factory=list)
+    terminal_reward: float = 0.0
 
     def __len__(self) -> int:
         return len(self.states)
@@ -165,6 +166,7 @@ class TrainingBuffer:
         self.advantages.clear()
         self.returns.clear()
         self.old_log_probs.clear()
+        self.terminal_reward = 0.0
 
     def to_tensors(self, device: str = "cuda") -> Dict[str, torch.Tensor]:
         return {
@@ -195,7 +197,7 @@ def compute_gae(
     A_t = δ_t + γλ * A_{t+1}
     G_t = A_t + V(s_t)
     """
-    T = len(rewards)
+    T = len(values)
     advantages = [0.0] * T
     returns = [0.0] * T
 
