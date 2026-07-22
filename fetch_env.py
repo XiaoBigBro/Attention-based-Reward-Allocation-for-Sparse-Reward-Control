@@ -209,7 +209,7 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
 # ---------------------------------------------------------------------------
 #1
 def make_fetch_env(
-    env_id: str = "FetchReach-v3",
+    env_id: str = "FetchReach-v4",
     curriculum_level: int = 0,
     render_mode: Optional[str] = None,
 ) -> EpisodicDwellRewardWrapper:

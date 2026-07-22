@@ -83,9 +83,9 @@ class MultiHeadAttention(nn.Module):
         self,
         d_model: int,#输入维度
         num_heads: int,#头数
-        dropout: float = 0.1,
-        bias: bool = True,#是否使用偏置
-        use_causal_mask: bool = False,#防止看到未来位置
+        dropout: float,
+        bias: bool,#是否使用偏置
+        use_causal_mask: bool ,#防止看到未来位置
     ):
         super().__init__()
         assert d_model % num_heads == 0, "d_model 必须能被 num_heads 整除"
@@ -154,14 +154,14 @@ class TransformerLayer(nn.Module):
         self,
         d_model: int,
         num_heads: int,
-        d_ff: int = 256,
-        dropout: float = 0.1,
-        use_causal_mask: bool = False,
+        d_ff: int,
+        dropout: float,
+        use_causal_mask: bool,
     ):
         super().__init__()
 
         # 自注意力层
-        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout,
+        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout,bias=True,
                                            use_causal_mask=use_causal_mask)
         self.norm1 = nn.LayerNorm(d_model)
 
@@ -201,15 +201,15 @@ class CrossAttentionLayer(nn.Module):
         self,
         d_model: int,
         num_heads: int,
-        d_ff: int = 256,
-        dropout: float = 0.1,
-        use_causal_mask: bool = True,
+        d_ff: int,
+        dropout: float,
+        use_causal_mask: bool,
     ):
         super().__init__()
 
         # 交叉注意力: Query 来自 state, Key/Value 来自 action
         # use_causal_mask=True: Q 在 t 时刻只能看到 V 的 0..t 位置（不能看未来动作）
-        self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout, use_causal_mask=use_causal_mask)
+        self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout, bias=True, use_causal_mask=use_causal_mask)
         self.norm1 = nn.LayerNorm(d_model)
 
         # 前馈网络
@@ -268,7 +268,7 @@ class RewardAllocator(nn.Module):
         d_ff: int,#前馈网络隐藏层维度
         dropout: float,
         entropy_coef: float,#熵正则化系数
-        max_seq_len: int = 200,#最大序列长度
+        max_seq_len: int ,#最大序列长度
     ):
         super().__init__()
 
@@ -319,6 +319,7 @@ class RewardAllocator(nn.Module):
         self,
         states: torch.Tensor,
         actions: torch.Tensor,
+        actions_dist: torch.Tensor,
     ) -> Tuple[torch.Tensor, dict]:
         """
         前向传播
@@ -335,11 +336,12 @@ class RewardAllocator(nn.Module):
         if states.dim() == 2:
             states = states.unsqueeze(0)
             actions = actions.unsqueeze(0)
+            actions_dist = actions_dist.unsqueeze(0)
             squeeze_output = True
         else:
             squeeze_output = False
 
-        weights, metrics = self._forward_no_squeeze(states, actions)
+        weights, metrics = self._forward_no_squeeze(states, actions, actions_dist)
 
         # 如果输入是单序列，压缩输出
         if squeeze_output:
@@ -351,6 +353,7 @@ class RewardAllocator(nn.Module):
         self,
         states: torch.Tensor,
         actions: torch.Tensor,
+        actions_dist: torch.Tensor,
         terminal_reward: float = 0.0,
         gamma: float = 0.99,
         v_online: torch.Tensor = None,
@@ -375,14 +378,15 @@ class RewardAllocator(nn.Module):
         if states.dim() == 2:
             states = states.unsqueeze(0)
             actions = actions.unsqueeze(0)
+            actions_dist = actions_dist.unsqueeze(0)
             if v_online is not None:
                 v_online = v_online.unsqueeze(0)
             if v_target_next is not None:
                 v_target_next = v_target_next.unsqueeze(0)
             squeeze_input = True
 
-        # 前向传播（不传入 action_dist，保持训练/推理一致）
-        weights, metrics = self._forward_no_squeeze(states, actions)
+        # 前向传播
+        weights, metrics = self._forward_no_squeeze(states, actions, actions_dist)
 
         # TD error 计算
         if v_online is not None and v_target_next is not None:
@@ -426,6 +430,7 @@ class RewardAllocator(nn.Module):
         self,
         states: torch.Tensor,
         actions: torch.Tensor,
+        actions_dist: torch.Tensor,
     ) -> Tuple[torch.Tensor, dict]:
         batch_size, seq_len, _ = states.shape
 
@@ -437,8 +442,8 @@ class RewardAllocator(nn.Module):
         v_emb = self.action_encoder(actions)
         v_emb = self.pos_encoder(v_emb)
 
-        # K = 零向量（不使用 action_dist，保持训练/推理一致）
-        k_emb = torch.zeros(batch_size, actions.size(1), self.d_model, device=states.device)
+        # K = 动作分布
+        k_emb = self.dist_encoder(actions_dist)
 
         # Q 处理
         q_hidden = q_emb
@@ -449,7 +454,7 @@ class RewardAllocator(nn.Module):
         # 位置 t (s_t, a_{t-1}) 只能看到 a_0..a_{t-1}（因果掩码）
         fused = q_hidden
         for layer in self.cross_layers:
-            fused = layer(fused[:, :actions.size(1)], k_emb, v_emb)
+            fused = layer(fused, k_emb, v_emb)
 
         logits = self.output_proj(fused).squeeze(-1)
         logits = logits[..., 1:]  # 丢弃第一个位置（对应 s_0，无有效 a_{-1}）
@@ -474,6 +479,7 @@ class RewardAllocatorConfig:
     dropout: float
     entropy_coef: float
     learning_rate: float
+    max_seq_len: int
 
 #1
 class RewardAllocatorAgent:
@@ -497,6 +503,7 @@ class RewardAllocatorAgent:
             d_ff=config.d_ff,
             dropout=config.dropout,
             entropy_coef=config.entropy_coef,
+            max_seq_len=config.max_seq_len,#最大序列长度
         ).to(device)
 
         # 优化器
@@ -512,6 +519,7 @@ class RewardAllocatorAgent:
         self,
         states: np.ndarray,
         actions: np.ndarray,
+        actions_dist: np.ndarray,
     ) -> Tuple[np.ndarray, dict]:
         """
         分配奖励
@@ -528,8 +536,9 @@ class RewardAllocatorAgent:
         with torch.no_grad():
             states_t = torch.FloatTensor(states).to(self.device)
             actions_t = torch.FloatTensor(actions).to(self.device)
+            actions_dist_t = torch.FloatTensor(actions_dist).to(self.device)
 
-            weights, metrics = self.network(states_t, actions_t)
+            weights, metrics = self.network(states_t, actions_t, actions_dist_t)
 
             # 转为 numpy
             weights = weights.cpu().numpy()
@@ -540,6 +549,7 @@ class RewardAllocatorAgent:
         self,
         states: np.ndarray,
         actions: np.ndarray,
+        actions_dist: np.ndarray,
         terminal_reward: float = 0.0,
         gamma: float = 0.99,
         v_online: np.ndarray = None,
@@ -561,6 +571,7 @@ class RewardAllocatorAgent:
         # 转为 tensor
         states_t = torch.FloatTensor(states).to(self.device)
         actions_t = torch.FloatTensor(actions).to(self.device)
+        actions_dist_t = torch.FloatTensor(actions_dist).to(self.device)
         if v_online is not None:
             v_online_t = torch.FloatTensor(v_online).to(self.device)
         else:
@@ -573,7 +584,7 @@ class RewardAllocatorAgent:
         # 前向传播
         self.optimizer.zero_grad()
         loss, metrics = self.network.compute_td_loss(
-            states_t, actions_t,
+            states_t, actions_t, actions_dist_t,
             terminal_reward, gamma,
             v_online_t, v_target_next_t,
         )

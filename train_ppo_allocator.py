@@ -34,8 +34,8 @@ from reward_allocator import RewardAllocatorAgent, RewardAllocatorConfig
 class TrainingConfig:
     """训练配置：包含所有可调超参数，供 PPOTrainerWithAllocator 使用"""
     # 环境
-    env_id: str = "FetchReach-v3"
-    seed: int = 123
+    env_id: str = "FetchReach-v4"
+    seed: int = 42
 
     # PPO 网络
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
@@ -54,17 +54,18 @@ class TrainingConfig:
     ppo_epochs: int = 6#PPO训练epochs
     critic_updates_per_epoch: int = 2#价值网络更新次数
     batch_size: int = 128#训练的时候采样的批量大小
-    max_grad_norm: float = 0.5#最大梯度范数
+    max_grad_norm: float = 0.5#最大梯度范数，防止梯度爆炸
     tau: float = 0.005#目标网络更新参数
 
     # 奖励分配网络
-    alloc_d_model: int = 64#奖励分配网络隐藏层维度
+    alloc_d_model: int = 128#奖励分配网络隐藏层维度
     alloc_num_heads: int = 4#奖励分配网络头数
     alloc_num_layers: int = 2#奖励分配网络层数
     alloc_d_ff: int = 256#奖励分配网络前馈网络隐藏层维度
     alloc_dropout: float = 0.1#奖励分配网络dropout率
     alloc_entropy_coef: float = 0.01#奖励分配网络熵正则化系数
     alloc_lr: float = 3e-4#奖励分配网络学习率
+    max_seq_len: int = 200#奖励分配网络最大序列长度
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
@@ -79,7 +80,7 @@ class TrainingConfig:
     log_interval: int = 10#日志间隔
     save_interval: int = 2000#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
-    device: str = "cpu"  # 设备
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"  # 设备（自动检测）
 
 
 @dataclass
@@ -139,6 +140,7 @@ class PPOTrainerWithAllocator:
 
         # 创建设备
         self.device = torch.device(config.device)
+        print(f"设备: device={self.device}")
         
         # 自动查询环境维度（不创建渲染窗口）
         obs_dim = get_env_obs_dim(config.env_id)
@@ -176,6 +178,7 @@ class PPOTrainerWithAllocator:
             dropout=config.alloc_dropout,
             entropy_coef=config.alloc_entropy_coef,
             learning_rate=config.alloc_lr,
+            max_seq_len=config.max_seq_len,
         )
         self.allocator_agent = RewardAllocatorAgent(alloc_config, self.device)
 
@@ -196,9 +199,8 @@ class PPOTrainerWithAllocator:
         )
 
         print("[5/5] 准备完成!")
-        # 全局训练计数器（用于学习率衰减、熵系数衰减）
-        self.episode_count = 0
-        self.step_count = 0  # 总步数统计
+        # 全局训练计数器
+        self.episode_count = 0#回合数计数器
 
     def _policy_fn(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
         """策略函数，用于采集数据"""
@@ -273,22 +275,23 @@ class PPOTrainerWithAllocator:
         weights, metrics = self.allocator_agent.allocate(
             states=obs_padded,
             actions=act_padded,
+            actions_dist=buffer.get_action_dist(),
         )
 
         # 计算分配后的奖励
         terminal_reward = buffer.terminal_reward
         allocated_rewards = weights * terminal_reward
 
-        return allocated_rewards
+        return allocated_rewards#长度为N
 
     def compute_gae_and_train_buffer(
         self,
-        buffer: RawTrajectoryBuffer,
-        allocated_rewards: np.ndarray,
+        buffer: RawTrajectoryBuffer,#长度为N+1
+        allocated_rewards: np.ndarray,#长度为N
     ) -> TrainingBuffer:
         """计算 GAE 并构建训练缓冲区"""
         # 实际 transition 数 N (observations 有 N+1 个，包含 terminal state)
-        N = len(buffer.observations) - 1
+        N = len(buffer.observations) - 1#长度为N
         if N == 0:
             return TrainingBuffer()
 
@@ -300,14 +303,9 @@ class PPOTrainerWithAllocator:
             critic_values = self.network.get_value(obs_tensor).squeeze(-1).cpu().numpy().tolist()
             target_values = self.network.get_target_value(obs_tensor).squeeze(-1).cpu().numpy().tolist()
 
-        # GAE 的正确长度关系 (都是 N):
-        # values:     V(s_0), V(s_1), ..., V(s_{N-1})      -> critic_values[:-1]
-        # next_values: V(s_1), V(s_2), ..., V(s_N)           -> target_values[1:]
-        # rewards:    r_0,    r_1,    ..., r_{N-1}           -> allocated_rewards
-        # dones:      False,  ...,    False, True            -> 最后一步是 terminal
-        values = critic_values[:-1]  # 长度 N
-        next_values = target_values[1:]  # 长度 N
-        dones = [False] * (N - 1) + [True]  # 长度 N
+        values = critic_values[:-1]  # 长度 N，取出V(s_0), V(s_1), ..., V(s_{N-1})
+        next_values = target_values[1:]  # 长度 N，取出V(s_1), V(s_2), ..., V(s_{N})
+        dones = [False] * (N - 1) + [True]  # 长度 N，最后一步是 terminal
 
         # 计算 GAE（所有输入长度必须一致为 N）
         advantages, returns = compute_gae(
@@ -411,6 +409,7 @@ class PPOTrainerWithAllocator:
         self,
         train_buffer: TrainingBuffer,
         critic_network,
+        buffer: RawTrajectoryBuffer,
     ) -> Dict[str, float]:
         """训练奖励分配网络"""
         T = len(train_buffer)  # N 个 transition
@@ -433,18 +432,14 @@ class PPOTrainerWithAllocator:
 
         # allocator 前向输出 weights 为 N（position 1...N 对应 transition 0...N-1）
         # TD target 使用对应位置的 value: V(s_1)...V(s_N)
-        v_online = v_all[1:].cpu().numpy()  # [N]
+        v_online = v_all[:-1].cpu().numpy()  # [N]
         v_target_next = v_target_all[1:].cpu().numpy()  # [N]，最后一步 V(s_N) 用于 bootstrap
-
-        # DEBUG: log shapes before calling train_step
-        import sys
-        with open("debug-03c78f.log", "a") as f:
-            f.write(f'{{"msg":"train_allocator_step","T":"{T}","states_shape":"{states_padded.shape}","actions_shape":"{actions_padded.shape}","v_all_shape":"{v_all.shape}","v_all_np":"{v_all.shape}","v_online":"{v_online.shape}","v_target_next":"{v_target_next.shape}"}}\n')
 
         # 训练分配网络
         metrics = self.allocator_agent.train_step(
             states=states_padded,
             actions=actions_padded,
+            actions_dist=buffer.get_action_dist(),
             terminal_reward=train_buffer.terminal_reward,
             gamma=self.config.gamma,
             v_online=v_online,
@@ -463,7 +458,7 @@ class PPOTrainerWithAllocator:
         raw_buffer = self.collect_trajectory()
 
         # 2. 奖励分配
-        allocated_rewards = self.allocate_rewards(raw_buffer)
+        allocated_rewards = self.allocate_rewards(raw_buffer)#长度为N
 
         # 3. 计算 GAE 并构建训练缓冲区
         train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards)
@@ -472,7 +467,7 @@ class PPOTrainerWithAllocator:
         ppo_metrics = self.train_ppo_step(train_buffer)
 
         # 5. 训练分配网络
-        alloc_metrics = self.train_allocator_step(train_buffer, self.network)
+        alloc_metrics = self.train_allocator_step(train_buffer, self.network, raw_buffer)
 
         # 6. 更新课程学习
         terminal_reward = raw_buffer.terminal_reward
@@ -624,50 +619,6 @@ def set_seed(seed: int):
         torch.backends.cudnn.benchmark = False
 
 # ============================================================================
-# 3. 打印训练配置
-# ============================================================================
-def print_config(config: TrainingConfig):
-    """打印训练配置"""
-    print("=" * 60)
-    print("PPO + 奖励分配网络 + 自适应课程学习")
-    print("=" * 60)
-
-    # 打印关键超参数
-    print("\n" + "=" * 60)
-    print("关键超参数")
-    print("=" * 60)
-    print(f"  PPO:")
-    print(f"    策略网络学习率:       {config.actor_lr}")
-    print(f"    价值网络学习率:       {config.critic_lr}")
-    print(f"    熵系数:              {config.entropy_coef}")
-    print(f"    ppo_epochs:          {config.ppo_epochs}")
-    print(f"    critic_updates:      {config.critic_updates_per_epoch} 次/epoch (共 {config.ppo_epochs * config.critic_updates_per_epoch} 次)")
-    print(f"    batch_size:          {config.batch_size}")
-    print(f"    gamma:               {config.gamma}")
-    print(f"    lambda (GAE):        {config.lam}")
-    print(f"    clip_eps:            {config.clip_eps}")
-    print(f"    value_coef:          {config.value_coef}")
-    print(f"    max_grad_norm:       {config.max_grad_norm}")
-    print(f"  奖励分配网络:")
-    print(f"    学习率:              {config.alloc_lr}")
-    print(f"    熵系数:              {config.alloc_entropy_coef}")
-    print(f"    d_model:             {config.alloc_d_model}")
-    print(f"    num_heads:           {config.alloc_num_heads}")
-    print(f"    num_layers:          {config.alloc_num_layers}")
-    print(f"  课程学习:")
-    print(f"    window_size:         {config.curriculum_window_size}")
-    print(f"    promote_threshold:    {config.curriculum_promote_threshold}")
-    print(f"    demote_threshold:    {config.curriculum_demote_threshold}")
-    print(f"    promote_cooldown:    {config.curriculum_promote_cooldown}")
-    print(f"    demote_cooldown:    {config.curriculum_demote_cooldown}")
-    print(f"    replay_interval:    {config.curriculum_replay_interval}")
-    print(f"  训练:")
-    print(f"    total_episodes:      {config.total_episodes}")
-    print(f"    seed:                {config.seed}")
-    print(f"    cuda_device:         {config.device}")
-    print("=" * 60)
-
-# ============================================================================
 # 2. 主函数
 # ============================================================================
 
@@ -678,9 +629,6 @@ def main():
 
     # 设置随机数种子
     set_seed(config.seed)
-
-    # 打印配置
-    print_config(config)
 
     # 创建训练器
     trainer = PPOTrainerWithAllocator(config)
