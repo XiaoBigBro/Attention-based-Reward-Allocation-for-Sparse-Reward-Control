@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from ppo import TrainingBuffer
 
 
 # --- Positional Encoding ---
@@ -351,21 +352,17 @@ class RewardAllocator(nn.Module):
 
     def compute_td_loss(
         self,
-        states: torch.Tensor,
-        actions: torch.Tensor,
-        actions_dist: torch.Tensor,
-        terminal_reward: float = 0.0,
-        gamma: float = 0.99,
-        v_online: torch.Tensor = None,
-        v_target_next: torch.Tensor = None,
+        train_buffer: TrainingBuffer,
+        gamma: float,
+        v_online: torch.Tensor,
+        v_target_next: torch.Tensor,
+        device: str,
     ) -> Tuple[torch.Tensor, dict]:
         """
         计算 TD 误差损失 + 熵正则化。
 
         输入:
-            states: [N+1, obs_dim]
-            actions: [N+1, action_dim] (shifted: [zeros] + [a_0...a_N])
-            terminal_reward: float
+            train_buffer: TrainingBuffer
             gamma: float
             v_online: [N+1] (可选)，V(s_0)...V(s_N)
             v_target_next: [N+1] (可选)
@@ -373,56 +370,47 @@ class RewardAllocator(nn.Module):
         前向输出 weights: [N] (位置 1...N 对应 transition 0...N-1)
         TD 计算时需要把 v_online/v_target_next 对齐到 [N]
         """
-        # 确保 states 是 batch 格式
-        squeeze_input = False
-        if states.dim() == 2:
-            states = states.unsqueeze(0)
-            actions = actions.unsqueeze(0)
-            actions_dist = actions_dist.unsqueeze(0)
-            if v_online is not None:
-                v_online = v_online.unsqueeze(0)
-            if v_target_next is not None:
-                v_target_next = v_target_next.unsqueeze(0)
-            squeeze_input = True
 
-        # 前向传播
-        weights, metrics = self._forward_no_squeeze(states, actions, actions_dist)
+        # v_online/v_target_next: [B, N]（已是对齐到 N 的形状）
+        # weights: [N]，对应 transition 0...N-1
+        weights_np = np.array(train_buffer.weights)  # [N]
+        weights_t = torch.tensor(weights_np, dtype=torch.float32, requires_grad=True).to(device)
 
-        # TD error 计算
-        if v_online is not None and v_target_next is not None:
-            # DEBUG: log shapes for diagnosis
-            import sys
-            with open("debug-03c78f.log", "a") as f:
-                f.write(f'{{"msg":"compute_td_loss","weights_shape":"{list(weights.shape)}","v_online_shape":"{list(v_online.shape) if hasattr(v_online,"shape") else type(v_online)}","v_target_shape":"{list(v_target_next.shape) if hasattr(v_target_next,"shape") else type(v_target_next)}","terminal_reward":"{terminal_reward}"}}\n')
+        # 使用 weights * terminal_reward 计算分配的奖励
+        r_allocated = weights_np * train_buffer.terminal_reward  # [N]
+        r_allocated_t = torch.tensor(r_allocated, dtype=torch.float32, requires_grad=True).to(device)
 
-            # v_online/v_target_next: [B, N]（已是对齐到 N 的形状）
-            # weights: [B, N]，对应 transition 0...N-1
-            r_allocated = weights * terminal_reward  # [B, N]
-            td_target = r_allocated + gamma * v_target_next  # [B, N]
-            td_error = td_target - v_online  # [B, N]
-            td_loss = (td_error ** 2).mean()
-        else:
-            td_loss = (weights ** 2).mean()
+        # 确保 v_online 和 v_target_next 有梯度
+        v_online = v_online.detach().requires_grad_(True)
+        v_target_next = v_target_next.detach().requires_grad_(True)
+
+        td_target = r_allocated_t + gamma * v_target_next  # [B, N]
+        td_error = td_target - v_online  # [B, N]
+        td_loss = (td_error ** 2).mean()
 
         # 熵正则化（保持计算图连接）
-        entropy = -(weights * torch.log(weights + 1e-8)).sum(dim=-1).mean()
-        entropy_loss = -self.entropy_coef * entropy
+        entropy = -(weights_t * torch.log(weights_t + 1e-8)).sum(dim=-1).mean()
+        entropy_loss = self.entropy_coef * entropy
         total_loss = td_loss + entropy_loss
 
-        metrics.update({
+        # 构建诊断指标
+        metrics = {
             'td_loss': td_loss.item() if isinstance(td_loss, torch.Tensor) else td_loss,
             'entropy_loss': entropy_loss.item() if isinstance(entropy_loss, torch.Tensor) else entropy_loss,
             'total_loss': total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss,
-            'weights_mean': weights.mean().item(),
-            'weights_max': weights.max().item(),
-            'weights_min': weights.min().item(),
-        })
-
-        # 如果输入是单序列，压缩输出
-        if squeeze_input:
-            for k, v in list(metrics.items()):
-                if isinstance(v, float):
-                    metrics[k] = v
+            'rewards_mean': float(np.mean(r_allocated)),
+            'rewards_std': float(np.std(r_allocated)),
+            'rewards_max': float(np.max(r_allocated)),
+            'rewards_min': float(np.min(r_allocated)),
+            'weights_mean': weights_t.mean().item(),
+            'weights_std': weights_t.std().item(),
+            'weights_max': weights_t.max().item(),
+            'weights_min': weights_t.min().item(),
+            'v_online_mean': v_online.mean().item() if v_online is not None else 0.0,
+            'v_target_mean': v_target_next.mean().item() if v_target_next is not None else 0.0,
+            'td_error_mean': td_error.mean().item(),
+            'td_error_std': td_error.std().item(),
+        }
 
         return total_loss, metrics
 
@@ -547,10 +535,7 @@ class RewardAllocatorAgent:
 
     def train_step(
         self,
-        states: np.ndarray,
-        actions: np.ndarray,
-        actions_dist: np.ndarray,
-        terminal_reward: float = 0.0,
+        train_buffer: TrainingBuffer ,
         gamma: float = 0.99,
         v_online: np.ndarray = None,
         v_target_next: np.ndarray = None,
@@ -569,9 +554,6 @@ class RewardAllocatorAgent:
         self.network.train()
 
         # 转为 tensor
-        states_t = torch.FloatTensor(states).to(self.device)
-        actions_t = torch.FloatTensor(actions).to(self.device)
-        actions_dist_t = torch.FloatTensor(actions_dist).to(self.device)
         if v_online is not None:
             v_online_t = torch.FloatTensor(v_online).to(self.device)
         else:
@@ -584,9 +566,7 @@ class RewardAllocatorAgent:
         # 前向传播
         self.optimizer.zero_grad()
         loss, metrics = self.network.compute_td_loss(
-            states_t, actions_t, actions_dist_t,
-            terminal_reward, gamma,
-            v_online_t, v_target_next_t,
+            train_buffer, gamma, v_online_t, v_target_next_t, self.device
         )
 
         # 反向传播

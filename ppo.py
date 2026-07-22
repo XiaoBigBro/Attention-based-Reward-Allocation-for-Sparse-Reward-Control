@@ -173,6 +173,7 @@ class TrainingBuffer:
     advantages: List[float] = field(default_factory=list)
     returns: List[float] = field(default_factory=list)
     old_log_probs: List[float] = field(default_factory=list)
+    weights: List[float] = field(default_factory=list)
     terminal_reward: float = 0.0
 
     def _check_consistency(self):
