@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ppo import TrainingBuffer
+from buffer import TrainingBuffer
 
 
 # --- Positional Encoding ---
@@ -356,7 +356,6 @@ class RewardAllocator(nn.Module):
         gamma: float,
         v_online: torch.Tensor,
         v_target_next: torch.Tensor,
-        device: str,
     ) -> Tuple[torch.Tensor, dict]:
         """
         计算 TD 误差损失 + 熵正则化。
@@ -370,27 +369,16 @@ class RewardAllocator(nn.Module):
         前向输出 weights: [N] (位置 1...N 对应 transition 0...N-1)
         TD 计算时需要把 v_online/v_target_next 对齐到 [N]
         """
-
         # v_online/v_target_next: [B, N]（已是对齐到 N 的形状）
-        # weights: [N]，对应 transition 0...N-1
-        weights_np = np.array(train_buffer.weights)  # [N]
-        weights_t = torch.tensor(weights_np, dtype=torch.float32, requires_grad=True).to(device)
-
-        # 使用 weights * terminal_reward 计算分配的奖励
-        r_allocated = weights_np * train_buffer.terminal_reward  # [N]
-        r_allocated_t = torch.tensor(r_allocated, dtype=torch.float32, requires_grad=True).to(device)
-
-        # 确保 v_online 和 v_target_next 有梯度
-        v_online = v_online.detach().requires_grad_(True)
-        v_target_next = v_target_next.detach().requires_grad_(True)
-
-        td_target = r_allocated_t + gamma * v_target_next  # [B, N]
+        # weights: [B, N]，对应 transition 0...N-1
+        r_allocated = train_buffer.rewards  # [B, N]
+        td_target = r_allocated + gamma * v_target_next  # [B, N]
         td_error = td_target - v_online  # [B, N]
         td_loss = (td_error ** 2).mean()
 
         # 熵正则化（保持计算图连接）
-        entropy = -(weights_t * torch.log(weights_t + 1e-8)).sum(dim=-1).mean()
-        entropy_loss = self.entropy_coef * entropy
+        entropy = -(r_allocated * torch.log(r_allocated + 1e-8)).sum(dim=-1).mean()
+        entropy_loss = -self.entropy_coef * entropy
         total_loss = td_loss + entropy_loss
 
         # 构建诊断指标
@@ -398,18 +386,14 @@ class RewardAllocator(nn.Module):
             'td_loss': td_loss.item() if isinstance(td_loss, torch.Tensor) else td_loss,
             'entropy_loss': entropy_loss.item() if isinstance(entropy_loss, torch.Tensor) else entropy_loss,
             'total_loss': total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss,
-            'rewards_mean': float(np.mean(r_allocated)),
-            'rewards_std': float(np.std(r_allocated)),
-            'rewards_max': float(np.max(r_allocated)),
-            'rewards_min': float(np.min(r_allocated)),
-            'weights_mean': weights_t.mean().item(),
-            'weights_std': weights_t.std().item(),
-            'weights_max': weights_t.max().item(),
-            'weights_min': weights_t.min().item(),
+            'rewards_mean': r_allocated.mean().item() if hasattr(r_allocated, 'mean') else np.mean(r_allocated),
+            'rewards_std': r_allocated.std().item() if hasattr(r_allocated, 'std') else np.std(r_allocated),
+            'rewards_max': r_allocated.max().item() if hasattr(r_allocated, 'max') else np.max(r_allocated),
+            'rewards_min': r_allocated.min().item() if hasattr(r_allocated, 'min') else np.min(r_allocated),
             'v_online_mean': v_online.mean().item() if v_online is not None else 0.0,
             'v_target_mean': v_target_next.mean().item() if v_target_next is not None else 0.0,
-            'td_error_mean': td_error.mean().item(),
-            'td_error_std': td_error.std().item(),
+            'td_error_mean': td_error.mean().item() if hasattr(td_error, 'mean') else np.mean(td_error),
+            'td_error_std': td_error.std().item() if hasattr(td_error, 'std') else np.std(td_error),
         }
 
         return total_loss, metrics
@@ -566,7 +550,7 @@ class RewardAllocatorAgent:
         # 前向传播
         self.optimizer.zero_grad()
         loss, metrics = self.network.compute_td_loss(
-            train_buffer, gamma, v_online_t, v_target_next_t, self.device
+            train_buffer, gamma, v_online_t, v_target_next_t,
         )
 
         # 反向传播
