@@ -389,7 +389,7 @@ class RewardAllocator(nn.Module):
         td_loss = (td_error ** 2).mean()
 
         # 熵正则化（保持计算图连接）
-        entropy = -(weights_t * torch.log(weights_t + 1e-8)).sum(dim=-1).mean()
+        entropy = (weights_t * torch.log(weights_t + 1e-8)).sum(dim=-1).mean()
         entropy_loss = self.entropy_coef * entropy
         total_loss = td_loss + entropy_loss
 

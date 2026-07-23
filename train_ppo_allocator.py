@@ -130,9 +130,14 @@ class PPOTrainerWithAllocator:
         save_dir = config.save_dir.format(seed=config.seed)
         self.save_dir = save_dir
 
+        # 如果文件夹已存在，删除旧内容以确保干净的训练状态
+        if os.path.exists(save_dir):
+            import shutil
+            shutil.rmtree(save_dir)
+        os.makedirs(save_dir)
+
         # 奖励记录文件（按种子区分）
         self.rewards_file = f"{self.save_dir}/training_rewards.txt"
-        os.makedirs(save_dir, exist_ok=True)
         with open(self.rewards_file, 'w') as f:
             f.write("episode,terminal_reward,curriculum_level\n")
 
@@ -351,7 +356,6 @@ class PPOTrainerWithAllocator:
 
         # 标准化优势
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        advantages = advantages * 10.0  # 放大优势，增强梯度信号
 
         # 累计多 epoch 的损失
         total_policy_loss = 0.0
