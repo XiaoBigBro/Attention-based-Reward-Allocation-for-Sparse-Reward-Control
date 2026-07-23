@@ -39,17 +39,17 @@ class TrainingConfig:
 
     # PPO 网络
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
-    log_std_min: float = -2.0#策略网络log标准差最小值
-    log_std_max: float = 3.0#策略网络log标准差最大值
-    log_std_init: float = 2.0#策略网络log标准差初始值
+    log_std_min: float = -3.0#策略网络log标准差最小值
+    log_std_max: float = 1.5#策略网络log标准差最大值
+    log_std_init: float = 1.0#策略网络log标准差初始值
 
     # PPO 训练
     gamma: float = 0.99#折扣因子
     lam: float = 0.98#GAE参数
     clip_eps: float = 0.2#PPO裁剪参数
-    entropy_coef: float = 1.0  # 熵正则化系数
-    actor_lr: float = 3e-4  # 策略网络学习率
-    critic_lr: float = 1e-4  # 价值网络学习率
+    entropy_coef: float = 0.5  # 熵正则化系数
+    actor_lr: float = 1e-4  # 策略网络学习率
+    critic_lr: float = 5e-4  # 价值网络学习率
     ppo_epochs: int = 6#PPO训练epochs
     critic_updates_per_epoch: int = 2#价值网络更新次数
     max_grad_norm: float = 0.5#最大梯度范数，防止梯度爆炸
@@ -62,7 +62,7 @@ class TrainingConfig:
     alloc_d_ff: int = 256#奖励分配网络前馈网络隐藏层维度
     alloc_dropout: float = 0.1#奖励分配网络dropout率
     alloc_entropy_coef: float = 0.001#奖励分配网络熵正则化系数
-    alloc_lr: float = 3e-4#奖励分配网络学习率
+    alloc_lr: float = 1e-3#奖励分配网络学习率
     max_seq_len: int = 200#奖励分配网络最大序列长度
 
     # 课程学习
