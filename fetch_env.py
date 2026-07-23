@@ -18,7 +18,7 @@ import numpy as np
 # 1. 课程难度参数
 # ---------------------------------------------------------------------------
 
-NUM_CURRICULUM_LEVELS = 4  # 等级 0.1.2.3
+NUM_CURRICULUM_LEVELS = 4  # 等级 0.1.2.3，其中0为密集奖励模式，1.2.3为稀疏奖励模式
 
 
 # 是一个代码生成器，它让你专注于定义“有哪些数据”（属性），
@@ -26,18 +26,16 @@ NUM_CURRICULUM_LEVELS = 4  # 等级 0.1.2.3
 @dataclass
 class EnvCurriculumParams:
     """控制难度的参数（单位：米）。"""
-    success_threshold: float = 0.20   #成功判定距离 d
-    min_segment_length: int = 1#奖励连续段长度小于min_segment_length的段不计算奖励
+    success_threshold: float = 0.15   #成功判定距离 d
+    target_range: float = 0.15#目标区所在的位置范围大小
     max_episode_steps: int = 100#最大回合步数
-    target_range: float = 0.10#目标区所在的位置范围大小
-    segment_scale: float = 1.0#奖励系数 K
-    reward_power: float = 1.3#指数奖励因子 p
+    dense_reward: bool = True#是否使用密集奖励模式
 
 CURRICULUM_PRESETS = {
-    0: EnvCurriculumParams(target_range=0.10, success_threshold=0.20, max_episode_steps=100, min_segment_length=1),
-    1: EnvCurriculumParams(target_range=0.15, success_threshold=0.15, max_episode_steps=100, min_segment_length=1),
-    2: EnvCurriculumParams(target_range=0.20, success_threshold=0.10, max_episode_steps=100, min_segment_length=1),
-    3: EnvCurriculumParams(target_range=0.25, success_threshold=0.05, max_episode_steps=100, min_segment_length=1),
+    0: EnvCurriculumParams(target_range=0.15, success_threshold=0.15, max_episode_steps=100,dense_reward=True),
+    1: EnvCurriculumParams(target_range=0.15, success_threshold=0.15, max_episode_steps=100,dense_reward=False),
+    2: EnvCurriculumParams(target_range=0.20, success_threshold=0.10, max_episode_steps=100,dense_reward=False),
+    3: EnvCurriculumParams(target_range=0.25, success_threshold=0.05, max_episode_steps=100,dense_reward=False),
 }
 
 
@@ -45,17 +43,26 @@ CURRICULUM_PRESETS = {
 # 2. 奖励计算
 # ---------------------------------------------------------------------------
 
-def compute_terminal_reward(
-    dwell_segments: list[int],
-    *,
-    params: EnvCurriculumParams,
+def compute_step_reward(
+    obs: dict,
 ) -> float:
-    """回合结束时计算最终奖励。"""
-    return params.segment_scale * sum(
-        L ** params.reward_power
-        for L in dwell_segments
-        if L >= params.min_segment_length
-    )
+    """每步的即时奖励，基于末端与目标的距离计算。
+
+    距离越近，奖励越高（负距离作为奖励）。
+    """
+    achieved = obs.get("achieved_goal")
+    desired = obs.get("desired_goal")
+    if achieved is None or desired is None:
+        return 0.0
+    dist = float(np.linalg.norm(achieved - desired))
+    return -dist
+
+
+def compute_terminal_reward(
+    step_rewards: list[float],
+) -> float:
+    """回合结束时计算最终奖励，等于所有即时奖励之和。"""
+    return sum(step_rewards)
 
 
 # ---------------------------------------------------------------------------
@@ -64,14 +71,12 @@ def compute_terminal_reward(
 #1
 class EpisodicDwellRewardWrapper(gym.Wrapper):
     """
-    将 FetchReach/Push 改造为严格回合级稀疏奖励。
+    将 FetchReach/Push 改造为可切换的稠密/稀疏奖励环境。
 
     行为：
-    - 每步 reward = 0（中间无反馈）
+    - Level 0 (dense_reward=True): 每步返回基于距离的即时奖励
+    - Level 1+ (dense_reward=False): 中间步 reward=0，回合末返回累积奖励
     - 回合固定跑满 T 步（不因提前到达目标而提前终止）
-    - 每步判定是否在目标区（||achieved_goal - desired_goal|| < ε）
-    - 离开目标区则连续计数清零，每段长度记录到 dwell_segments
-    - 末步按 R_final = sum(L^p) 返回累计奖励
     """
 
     def __init__(
@@ -82,11 +87,11 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         super().__init__(env)#这里的env就是__init__方法中的env参数，调用父类gym.Wrapper的__init__方法
         self._curriculum_level = curriculum_level
         self._params = CURRICULUM_PRESETS[curriculum_level]
+        self._dense_reward = self._params.dense_reward#True时为密集奖励模式，False时为稀疏奖励模式
 
         # 回合状态
         self._episode_step: int = 0#当前回合的步数
-        self._current_segment_len: int = 0#当前连续段的长度
-        self._dwell_segments: list[int] = []#连续段列表
+        self._step_rewards: list[float] = []  # 存储每步的即时奖励
 
         # 同步 target_range 到底层 env（供 _sample_goal 使用）
         self._sync_target_range()#同步 target_range 到底层 env（供 _sample_goal 使用）
@@ -97,14 +102,21 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
 
     @property
     def curriculum_level(self) -> int:
+        """返回当前难度等级。"""
         return self._curriculum_level
 
-    def set_curriculum_level(self, level: int) -> None:
+    @property
+    def use_dense_reward(self) -> bool:
+        """返回是否使用稠密奖励模式。"""
+        return self._dense_reward
+
+    def set_curriculum_level(self, level: int, ) -> None:
         """切换到指定难度等级（0=易, 1=中, 2=难,3=最难）。"""
         if level not in CURRICULUM_PRESETS:
             raise ValueError(f"level must be 0..{NUM_CURRICULUM_LEVELS - 1}, got {level}")
         self._curriculum_level = level
         self._params = CURRICULUM_PRESETS[level]
+        self._dense_reward = self._params.dense_reward  # Level 0 用稠密，Level 1+ 用稀疏
         self._sync_target_range()
 
     def get_curriculum_params(self) -> EnvCurriculumParams:
@@ -128,25 +140,10 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
             # FetchPush 等可能属性不同，静默忽略
             pass
 
-    def _is_at_goal(self, obs: dict) -> bool:
-        """判定当前末端/物体是否在目标区内。"""
-        achieved = obs.get("achieved_goal")
-        desired = obs.get("desired_goal")
-        if achieved is None or desired is None:
-            return False
-        dist = float(np.linalg.norm(achieved - desired))
-        return dist < self._params.success_threshold
-
-    def _flush_current_segment(self) -> None:
-        """收尾当前连续段（回合结束时调用）。"""
-        if self._current_segment_len > 0:
-            self._dwell_segments.append(self._current_segment_len)
-
     def _reset_episode_state(self) -> None:
         """reset() / 新回合开始时重置计数。"""
         self._episode_step = 0
-        self._current_segment_len = 0
-        self._dwell_segments = []
+        self._step_rewards = []
 
     # ------------------------------------------------------------------
     # gym.Wrapper 覆写
@@ -162,18 +159,12 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
     def step(self, action):
         # 丢弃底层 reward，用我们自己的
         obs, _, terminated, truncated, info = self.env.step(action)
-        raw_reward = 0.0  # 屏蔽原生逐步奖励
 
-        # 判定是否在目标区
-        at_goal = self._is_at_goal(obs)
+        # 计算每步的即时奖励（基于距离）
+        step_reward = compute_step_reward(obs)
 
-        # 更新连续段计数
-        if at_goal:
-            self._current_segment_len += 1
-        else:
-            if self._current_segment_len > 0:
-                self._dwell_segments.append(self._current_segment_len)
-            self._current_segment_len = 0#如果不在目标区，则当前连续段长度清零
+        # 存储即时奖励
+        self._step_rewards.append(step_reward)
 
         self._episode_step += 1
 
@@ -183,24 +174,16 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         # 回合截断判断
         truncated = self._episode_step >= self._params.max_episode_steps
 
-        # 末步结算
-        if truncated:
-            self._flush_current_segment()
-            raw_reward = compute_terminal_reward(
-                self._dwell_segments,
-                params=self._params,
-            )
-
         # info 扩展
-        info["terminal_reward"] = raw_reward if truncated else 0.0
-        info["dwell_segments"] = self._dwell_segments if truncated else list(self._dwell_segments)
+        info["step_reward"] = step_reward
+        info["step_rewards"] = list(self._step_rewards)  # 所有即时奖励
+        info["terminal_reward"] = compute_terminal_reward(self._step_rewards) if truncated else 0.0
         info["curriculum_level"] = self._curriculum_level
-        info["curriculum_params"] = self._params
-        info["is_at_goal"] = at_goal
+        info["use_dense_reward"] = self._dense_reward
         info["episode_step"] = self._episode_step
 
-        return obs, raw_reward, terminated, truncated, info
-        #返回观测、奖励（为0，最后一步有奖励值）、终止(为False)、截断(如果回合步数达到最大步数，则截断为True，其余为False)、
+        return obs, terminated, truncated, info
+        #返回观测、终止(为False)、截断(如果回合步数达到最大步数，则截断为True，其余为False)、
         # 信息（包含当前难度等级、当前难度等级对应的参数、当前是否在目标区、当前回合步数、连续段列、最终奖励）
 
 
@@ -209,8 +192,8 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
 # ---------------------------------------------------------------------------
 #1
 def make_fetch_env(
-    env_id: str = "FetchReach-v4",
-    curriculum_level: int = 0,
+    env_id: str ,
+    curriculum_level: int ,
     render_mode: Optional[str] = None,
 ) -> EpisodicDwellRewardWrapper:
     """
@@ -224,6 +207,8 @@ def make_fetch_env(
         难度等级 0（易）/ 1（中）/ 2（难）/3（最难）
     render_mode : str, optional
         渲染模式，如 "human" / "rgb_array"
+    dense_reward : bool
+        是否使用稠密奖励模式。True 时每步返回即时奖励，False 时返回稀疏奖励。
 
     Returns
     -------

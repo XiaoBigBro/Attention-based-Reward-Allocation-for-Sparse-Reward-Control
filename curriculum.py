@@ -110,6 +110,7 @@ class AdaptiveCurriculumManager:
         promote_cooldown: int,#升级冷却时间
         demote_cooldown: int,#降级冷却时间
         replay_interval: int,#回放间隔
+        replay_times: int,#每个课程重放次数
     ):
         # 配置
         self.window_size = window_size
@@ -118,6 +119,7 @@ class AdaptiveCurriculumManager:
         self.promote_cooldown = promote_cooldown
         self.demote_cooldown = demote_cooldown
         self.replay_interval = replay_interval
+        self.replay_times = replay_times
 
         # 状态
         self.current_level: int = 0#当前等级
@@ -139,7 +141,7 @@ class AdaptiveCurriculumManager:
         self._replay_levels: List[int] = []  # 保存所有需要回放的等级（轮流回放）
         self._replay_level_index: int = 0     # 当前回放的等级索引
         self._replay_episode_count: int = 0   # 当前等级回放的回合数
-
+        self._replay_times: int = 0   # 当前等级回放的次数
     @property
     def progress(self) -> float:
         """当前等级的训练进度 [0, 1]，基于冷却进度。"""
@@ -173,7 +175,7 @@ class AdaptiveCurriculumManager:
             self._replay_episode_count += 1
 
             # 每个等级回放5回合后切换到下一个等级
-            if self._replay_episode_count >= 5:
+            if self._replay_episode_count >= self.replay_times:
                 self._replay_episode_count = 0
                 self._replay_level_index += 1
 
@@ -189,7 +191,8 @@ class AdaptiveCurriculumManager:
 
         # 检查是否触发课程切换（不在回放时才检查）
         if not in_replay:
-            return self._check_curriculum_change(terminal_reward)
+            return self._check_curriculum_change()
+            
         return False
 
     def _check_replay(self) -> None:
@@ -210,7 +213,7 @@ class AdaptiveCurriculumManager:
                 self._replay_level_index = 0  # 从第一个等级开始回放
                 print(f"\n*** 进入课程回放模式! 将依次回放等级: {replay_levels} ***\n")
 
-    def _check_curriculum_change(self, current_reward: float) -> bool:
+    def _check_curriculum_change(self) -> bool:
         """检查是否触发课程切换（窗口均值 + 冷却 + 阈值判断）。"""
         if not self.reward_window.is_full():
             return False

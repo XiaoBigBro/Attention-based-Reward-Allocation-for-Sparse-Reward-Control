@@ -47,9 +47,9 @@ class TrainingConfig:
     gamma: float = 0.99#折扣因子
     lam: float = 0.98#GAE参数
     clip_eps: float = 0.2#PPO裁剪参数
-    entropy_coef: float = 0.5  # 熵正则化系数
+    entropy_coef: float = 0.1  # 熵正则化系数
     actor_lr: float = 1e-4  # 策略网络学习率
-    critic_lr: float = 5e-4  # 价值网络学习率
+    critic_lr: float = 3e-4  # 价值网络学习率
     ppo_epochs: int = 6#PPO训练epochs
     critic_updates_per_epoch: int = 2#价值网络更新次数
     max_grad_norm: float = 0.5#最大梯度范数，防止梯度爆炸
@@ -61,17 +61,18 @@ class TrainingConfig:
     alloc_num_layers: int = 2#奖励分配网络层数
     alloc_d_ff: int = 256#奖励分配网络前馈网络隐藏层维度
     alloc_dropout: float = 0.1#奖励分配网络dropout率
-    alloc_entropy_coef: float = 0.001#奖励分配网络熵正则化系数
+    alloc_entropy_coef: float = 0.05#奖励分配网络熵正则化系数
     alloc_lr: float = 1e-3#奖励分配网络学习率
     max_seq_len: int = 200#奖励分配网络最大序列长度
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
-    curriculum_promote_threshold: float = 200.0#课程学习提升阈值
-    curriculum_demote_threshold: float = 20.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 150#课程学习提升冷却期
-    curriculum_demote_cooldown: int = 50#课程学习降级冷却期
+    curriculum_promote_threshold: float = -10.0#课程学习提升阈值
+    curriculum_demote_threshold: float = -30.0#课程学习降级阈值
+    curriculum_promote_cooldown: int = 1000#课程学习提升冷却期
+    curriculum_demote_cooldown: int = 200#课程学习降级冷却期
     curriculum_replay_interval: int = 100#课程学习重放间隔
+    curriculum_replay_times: int = 10#每个课程重放次数
 
     # 训练流程
     total_episodes: int = 100000
@@ -193,6 +194,7 @@ class PPOTrainerWithAllocator:
             promote_cooldown=config.curriculum_promote_cooldown,
             demote_cooldown=config.curriculum_demote_cooldown,
             replay_interval=config.curriculum_replay_interval,
+            replay_times=config.curriculum_replay_times,
         )
 
         print("[4/5] 初始化环境...")
@@ -200,7 +202,9 @@ class PPOTrainerWithAllocator:
             env_id=config.env_id,
             curriculum_level=0,  # 从最简单的难度开始
         )
-
+        self.dense_reward = self.env._dense_reward#奖励模式
+        self.curriculum_level = self.env.curriculum_level#课程学习等级
+        
         print("[5/5] 准备完成!")
         # 全局训练计数器
         self.episode_count = 0#回合数计数器
@@ -241,7 +245,7 @@ class PPOTrainerWithAllocator:
             action, mean, log_std, log_prob, value = self._policy_fn(obs)
 
             # 与环境交互
-            next_obs, reward, terminated, truncated, info = self.env.step(action)
+            next_obs, terminated, truncated, info = self.env.step(action)
             next_obs = unpack_obs(next_obs)
 
             # 存储
@@ -258,9 +262,10 @@ class PPOTrainerWithAllocator:
         buffer.means.insert(0, np.zeros_like(buffer.means[0]))#插入一个零均值，长度为T+1
         buffer.log_stds.insert(0, np.zeros_like(buffer.log_stds[0]))#插入一个零对数标准差，长度为T+1
 
-        # 存储最终奖励
+        # 存储最终奖励和每步奖励的列表
         terminal_reward = info.get("terminal_reward", 0.0)
-        buffer.finalize(terminal_reward)
+        step_rewards = info.get("step_rewards", [])
+        buffer.finalize(terminal_reward, step_rewards)
 
         return buffer
 
@@ -333,9 +338,6 @@ class PPOTrainerWithAllocator:
             train_buffer.returns.append(returns[i])
             train_buffer.old_log_probs.append(buffer.log_probs[i])  # log π(a_i|s_i)
             train_buffer.next_states.append(observations[i + 1])  # s_{i+1}
-
-        # 长度一致性检查
-        train_buffer._check_consistency()
 
         return train_buffer
 
@@ -450,28 +452,74 @@ class PPOTrainerWithAllocator:
 
     def train_one_episode(self) -> TrainingMetrics:
         """训练一个回合"""
+        # 0. 检查是否需要回放，并保存当前难度
+        is_replay = self.curriculum_manager.should_replay()
+        replay_level = self.curriculum_manager.get_replay_level()
+        original_level = self.curriculum_level  # 保存原始等级
+        original_dense_reward = self.dense_reward  # 保存原始奖励模式
+
+        # 如果是回放模式，切换到目标难度
+        if is_replay and replay_level is not None:
+            self.env.set_curriculum_level(replay_level)
+            self.curriculum_level = replay_level
+            self.dense_reward = self.env._dense_reward
+            print(f"[回放] 从 level {original_level} 切换到 level {replay_level}")
+
         # 1. 采集轨迹
         raw_buffer = self.collect_trajectory()
 
-        # 2. 奖励分配
-        allocated_rewards,weights = self.allocate_rewards(raw_buffer)#长度为N
+        if not self.dense_reward:
+            '''level 1.2.3 使用稀疏奖励模式'''
+            # 2. 奖励分配
+            allocated_rewards,weights = self.allocate_rewards(raw_buffer)#长度为N
 
-        # 3. 计算 GAE 并构建训练缓冲区
-        train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards,weights)
+            # 3. 计算 GAE 并构建训练缓冲区
+            train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards,weights)
 
-        # 4. 训练 PPO
-        ppo_metrics = self.train_ppo_step(train_buffer)
+            # 4. PPO 只在 level 2+ 训练，level 1 专门训练分配网络
+            if self.curriculum_level >= 2:
+                ppo_metrics = self.train_ppo_step(train_buffer)
+            else:
+                ppo_metrics = {
+                    "policy_loss": 0,
+                    "value_loss": 0,
+                    "entropy_loss": 0,
+                    "ppo_loss": 0,
+                }
 
-        # 5. 训练分配网络
-        alloc_metrics = self.train_allocator_step(train_buffer, self.network)
+            # 5. 训练分配网络
+            alloc_metrics = self.train_allocator_step(train_buffer, self.network)
 
-        # 6. 更新课程学习
+        else:
+            '''level 0 使用密集奖励模式'''
+            # 2. 奖励分配
+            allocated_rewards = np.array(raw_buffer.step_rewards)  # 转为 numpy array
+
+            # 3. 计算 GAE 并构建训练缓冲区
+            train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards, [])
+
+            # 4. 训练 PPO
+            ppo_metrics = self.train_ppo_step(train_buffer)
+
+            alloc_metrics = {
+            "alloc_td_loss": 0,
+            "alloc_entropy_loss": 0,
+            "alloc_total_loss": 0,
+            }
+
+        # 回放结束后恢复原始难度
+        if is_replay:
+            self.env.set_curriculum_level(original_level)
+            self.curriculum_level = original_level
+            self.dense_reward = original_dense_reward
+
+        # 6. 更新课程学习（回放时不更新课程）
         terminal_reward = raw_buffer.terminal_reward
         curriculum_changed = self.curriculum_manager.on_episode_end(terminal_reward)
-        current_level = self.curriculum_manager.get_current_level()
+        self.curriculum_level = self.curriculum_manager.get_current_level()
 
         if curriculum_changed:
-            self.env.set_curriculum_level(current_level)
+            self.env.set_curriculum_level(self.curriculum_level)
 
         # 构建指标
         metrics = TrainingMetrics(
@@ -479,7 +527,7 @@ class PPOTrainerWithAllocator:
             episode_reward=sum(allocated_rewards) if len(allocated_rewards) > 0 else 0,
             terminal_reward=terminal_reward,
             episode_length=len(raw_buffer) - 1,  # observations 有 N+1 个，transition 数为 N
-            curriculum_level=current_level,
+            curriculum_level=self.curriculum_level,
             curriculum_changed=curriculum_changed,
             learning_rate=self.get_lr()[0],
             **{**ppo_metrics, **alloc_metrics},
@@ -489,7 +537,7 @@ class PPOTrainerWithAllocator:
 
         # 每次回合结束都追加写入文件（课程切换时实时保存）
         with open(self.rewards_file, 'a') as f:
-            f.write(f"{self.episode_count},{terminal_reward},{current_level}\n")
+            f.write(f"{self.episode_count},{terminal_reward},{self.curriculum_level}\n")
 
         return metrics
 
@@ -503,7 +551,7 @@ class PPOTrainerWithAllocator:
         episode_rewards = []#回合奖励
         terminal_rewards = []#最终奖励
         curriculum_levels = []#课程等级
-
+        
         # 主循环，会在终端中显示一个动态进度条
         pbar = tqdm(total=self.config.total_episodes, desc="Training")
         start_time = time.time()
