@@ -125,6 +125,7 @@ class RawTrajectoryBuffer:
     log_probs: List[float] = field(default_factory=list)
     values: List[float] = field(default_factory=list)
     terminal_reward: float = 0.0
+    step_rewards: List[float] = field(default_factory=list)
 
     def add(self, obs, action, mean, log_std, log_prob, value):
         self.observations.append(obs)
@@ -134,8 +135,9 @@ class RawTrajectoryBuffer:
         self.log_probs.append(log_prob)
         self.values.append(value)
 
-    def finalize(self, terminal_reward: float):
+    def finalize(self, terminal_reward: float, step_rewards: List[float]):
         self.terminal_reward = terminal_reward
+        self.step_rewards = step_rewards
 
     def get_action_dist(self) -> np.ndarray:
         """返回 concat(mean, log_std)，形状 [N+1, action_dim * 2]（shifted）"""
@@ -176,13 +178,6 @@ class TrainingBuffer:
     weights: List[float] = field(default_factory=list)
     terminal_reward: float = 0.0
 
-    def _check_consistency(self):
-        """检查所有 per-transition 字段长度是否一致"""
-        N = len(self.states)
-        for field_name in ['actions', 'next_states', 'rewards', 'advantages', 'returns', 'old_log_probs']:
-            actual = len(getattr(self, field_name))
-            assert actual == N, f"{field_name} length {actual} != states length {N}"
-
     def __len__(self) -> int:
         return len(self.states)
 
@@ -195,6 +190,7 @@ class TrainingBuffer:
         self.returns.clear()
         self.old_log_probs.clear()
         self.terminal_reward = 0.0
+        self.weights.clear()
 
     def to_tensors(self, device: str = "cuda") -> Dict[str, torch.Tensor]:
         return {
