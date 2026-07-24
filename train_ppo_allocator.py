@@ -68,12 +68,9 @@ class TrainingConfig:
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
     curriculum_promote_threshold: float = -10.0#课程学习提升阈值
-    curriculum_demote_threshold: float = -50.0#课程学习降级阈值
+    curriculum_demote_threshold: float = -30.0#课程学习降级阈值
     curriculum_promote_cooldown: int = 1000#课程学习提升冷却期
     curriculum_demote_cooldown: int = 200#课程学习降级冷却期
-    curriculum_replay_interval: int = 100#课程学习重放间隔
-    curriculum_replay_times: int = 10#每个课程重放次数
-
     # 训练流程
     total_episodes: int = 100000
     log_interval: int = 10#日志间隔
@@ -193,8 +190,6 @@ class PPOTrainerWithAllocator:
             demote_threshold=config.curriculum_demote_threshold,
             promote_cooldown=config.curriculum_promote_cooldown,
             demote_cooldown=config.curriculum_demote_cooldown,
-            replay_interval=config.curriculum_replay_interval,
-            replay_times=config.curriculum_replay_times,
         )
 
         print("[4/5] 初始化环境...")
@@ -452,21 +447,10 @@ class PPOTrainerWithAllocator:
 
     def train_one_episode(self) -> TrainingMetrics:
         """训练一个回合"""
-        # 0. 检查是否需要回放，并保存当前难度
-        is_replay = self.curriculum_manager.should_replay()
-        replay_level = self.curriculum_manager.get_replay_level()
-        original_level = self.curriculum_level  # 保存原始等级
-        original_dense_reward = self.dense_reward  # 保存原始奖励模式
-
-        # 如果是回放模式，切换到目标难度
-        if is_replay and replay_level is not None:
-            self.env.set_curriculum_level(replay_level)
-            self.curriculum_level = replay_level
-            self.dense_reward = self.env._dense_reward
-            print(f"[回放] 从 level {original_level} 切换到 level {replay_level}")
-
         # 1. 采集轨迹
         raw_buffer = self.collect_trajectory()
+        # 获取当前奖励模式
+        self.dense_reward = self.env._dense_reward
 
         if not self.dense_reward:
             '''level 1.2.3 使用稀疏奖励模式'''
@@ -507,13 +491,7 @@ class PPOTrainerWithAllocator:
             "alloc_total_loss": 0,
             }
 
-        # 回放结束后恢复原始难度
-        if is_replay:
-            self.env.set_curriculum_level(original_level)
-            self.curriculum_level = original_level
-            self.dense_reward = original_dense_reward
-
-        # 6. 更新课程学习（回放时不更新课程）
+        # 更新课程学习
         terminal_reward = raw_buffer.terminal_reward
         curriculum_changed = self.curriculum_manager.on_episode_end(terminal_reward)
         self.curriculum_level = self.curriculum_manager.get_current_level()
@@ -556,45 +534,35 @@ class PPOTrainerWithAllocator:
         pbar = tqdm(total=self.config.total_episodes, desc="Training")
         start_time = time.time()
 
-        trained_episodes = 0  # 有效训练回合数（不含回放）
-
-        while trained_episodes < self.config.total_episodes:
-            # 检查是否需要回放
-            is_replay = self.curriculum_manager.should_replay()
-
+        while self.episode_count < self.config.total_episodes:
             # 训练一个回合
             metrics = self.train_one_episode()
 
-            # 只有非回放回合才计入有效训练
-            if not is_replay:
-                trained_episodes += 1
+            # 记录
+            episode_rewards.append(metrics.episode_reward)
+            terminal_rewards.append(metrics.terminal_reward)
+            curriculum_levels.append(metrics.curriculum_level)
 
-                # 记录
-                episode_rewards.append(metrics.episode_reward)
-                terminal_rewards.append(metrics.terminal_reward)
-                curriculum_levels.append(metrics.curriculum_level)
+            # 更新进度条
+            pbar.update(1)
+            pbar.set_postfix({
+                "Level": metrics.curriculum_level,
+                "TR": f"{metrics.terminal_reward:.1f}",
+                "ER": f"{metrics.episode_reward:.1f}",
+                "PPO": f"{metrics.ppo_loss:.3f}",
+                "Alloc": f"{metrics.alloc_total_loss:.3f}",
+            })
 
-                # 更新进度条
-                pbar.update(1)
-                pbar.set_postfix({
-                    "Level": metrics.curriculum_level,
-                    "TR": f"{metrics.terminal_reward:.1f}",
-                    "ER": f"{metrics.episode_reward:.1f}",
-                    "PPO": f"{metrics.ppo_loss:.3f}",
-                    "Alloc": f"{metrics.alloc_total_loss:.3f}",
-                })
-
-            # 日志（非回放时才打印，避免刷屏）
-            if not is_replay and trained_episodes % self.config.log_interval == 0:
+            # 日志
+            if self.episode_count % self.config.log_interval == 0:
                 avg_reward = np.mean(episode_rewards[-self.config.log_interval:])
                 current_level = self.curriculum_manager.get_current_level()
                 window_mean = self.curriculum_manager.reward_window.mean() if self.curriculum_manager.reward_window.count() > 0 else 0.0
                 current_entropy_coef = self.get_entropy_coef()
 
-                # 获取当前 log_std（直接从 actor 参数）
                 log_std_mean = self.network.actor.log_std.mean().item()
 
-                pbar.write(f"[Episode {trained_episodes}]")
+                pbar.write(f"[Episode {self.episode_count}]")
                 pbar.write(f"  课程等级: {current_level}")
                 pbar.write(f"  熵系数: {current_entropy_coef:.4f}, log_std: {log_std_mean:.4f}")
                 pbar.write(f"  平均最终奖励 (最近{self.config.log_interval}): {avg_reward:.2f}")
@@ -604,16 +572,16 @@ class PPOTrainerWithAllocator:
                 pbar.write(f"  分配网络损失: {metrics.alloc_total_loss:.4f}")
 
             # 课程升级时保存
-            if metrics.curriculum_changed == "promote" and not is_replay:
-                save_path = f"{self.save_dir}/level_up_{trained_episodes}.pt"
+            if metrics.curriculum_changed == "promote":
+                save_path = f"{self.save_dir}/level_up_{self.episode_count}.pt"
                 self.save(save_path)
                 pbar.write(f"*** 课程升级! 模型已保存: {save_path} ***")
 
-            # 定时保存（非回放回合）
-            if not is_replay and trained_episodes % self.config.save_interval == 0:
-                save_path = f"{self.save_dir}/checkpoint_{trained_episodes}.pt"
+            # 定时保存
+            if self.episode_count % self.config.save_interval == 0:
+                save_path = f"{self.save_dir}/checkpoint_{self.episode_count}.pt"
                 self.save(save_path)
-                pbar.write(f"[Episode {trained_episodes}] 模型已保存: {save_path}")
+                pbar.write(f"[Episode {self.episode_count}] 模型已保存: {save_path}")
 
         pbar.close()
 

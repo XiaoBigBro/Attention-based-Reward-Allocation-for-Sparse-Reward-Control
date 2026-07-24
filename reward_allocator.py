@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from buffer import TrainingBuffer
+from ppo import TrainingBuffer
 
 
 # --- Positional Encoding ---
