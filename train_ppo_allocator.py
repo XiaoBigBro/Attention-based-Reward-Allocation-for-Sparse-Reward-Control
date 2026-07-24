@@ -4,6 +4,7 @@ PPO + 奖励分配网络 + 自适应课程学习 完整训练脚本
 
 import os
 import time
+import argparse
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -636,8 +637,17 @@ def set_seed(seed: int):
 
 def main():
     """主函数"""
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description="PPO + 奖励分配网络训练")
+    parser.add_argument("--seed", type=int, default=None, help="随机种子 (默认: 42)")
+    args = parser.parse_args()
+
     # 创建配置
     config = TrainingConfig()
+
+    # 如果命令行指定了 seed，覆盖默认值
+    if args.seed is not None:
+        config.seed = args.seed
 
     # 设置随机数种子
     set_seed(config.seed)
