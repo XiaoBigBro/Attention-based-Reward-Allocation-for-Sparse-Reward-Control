@@ -423,19 +423,24 @@ class PPOTrainerWithAllocator:
 
         # 获取价值估计（长度为 N+1）
         obs_t = torch.FloatTensor(states_padded).to(self.device)
+        # online value 需要梯度，但 target value 不需要
+        v_all = critic_network.get_value(obs_t).squeeze(-1)  # [N+1]: V(s_0)...V(s_N)
         with torch.no_grad():
-            v_all = critic_network.get_value(obs_t).squeeze(-1)  # [N+1]: V(s_0)...V(s_N)
             v_target_all = critic_network.get_target_value(obs_t).squeeze(-1)  # [N+1]
 
         # allocator 前向输出 weights 为 N（position 1...N 对应 transition 0...N-1）
         # TD target 使用对应位置的 value: V(s_1)...V(s_N)
-        v_online = v_all[:-1].cpu().numpy()  # [N]
-        v_target_next = v_target_all[1:].cpu().numpy()  # [N]，最后一步 V(s_N) 用于 bootstrap
+        # 保持为 tensor 以支持梯度计算
+        v_online = v_all[:-1]  # [N]
+        v_target_next = v_target_all[1:]  # [N]，最后一步 V(s_N) 用于 bootstrap
+
+        # gamma 转为 tensor 以便与 tensor 相乘
+        gamma_tensor = torch.tensor(self.config.gamma, dtype=torch.float32, device=self.device)
 
         # 训练分配网络
         metrics = self.allocator_agent.train_step(
             train_buffer=train_buffer,
-            gamma=self.config.gamma,
+            gamma=gamma_tensor,
             v_online=v_online,
             v_target_next=v_target_next,
         )

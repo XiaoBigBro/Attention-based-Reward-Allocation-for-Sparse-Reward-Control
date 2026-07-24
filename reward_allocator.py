@@ -371,15 +371,38 @@ class RewardAllocator(nn.Module):
         """
         # v_online/v_target_next: [B, N]（已是对齐到 N 的形状）
         # weights: [B, N]，对应 transition 0...N-1
-        r_allocated = train_buffer.rewards  # [B, N]
-        td_target = r_allocated + gamma * v_target_next  # [B, N]
+        # train_buffer.rewards 是 list，需要转换为 tensor
+        r_allocated_list = train_buffer.rewards
+        if isinstance(r_allocated_list, list):
+            r_allocated = torch.FloatTensor(r_allocated_list).to(v_online.device)
+        else:
+            r_allocated = r_allocated_list
+        # gamma 转为 tensor
+        if not isinstance(gamma, torch.Tensor):
+            gamma_tensor = torch.tensor(gamma, dtype=torch.float32, device=v_online.device)
+        else:
+            gamma_tensor = gamma.to(v_online.device)
+        td_target = r_allocated + gamma_tensor * v_target_next  # [B, N]
         td_error = td_target - v_online  # [B, N]
         td_loss = (td_error ** 2).mean()
 
-        # 熵正则化（保持计算图连接）
-        entropy = -(r_allocated * torch.log(r_allocated + 1e-8)).sum(dim=-1).mean()
+        # 熵正则化：使用 softmax 归一化后的 weights 作为分布
+        # 确保 r_allocated 是正数（通过绝对值和 softmax）来计算熵
+        r_positive = torch.abs(r_allocated) + 1e-8  # 确保正数
+        r_normalized = torch.softmax(r_positive, dim=-1)  # softmax 归一化到 [0,1]
+        entropy = -(r_normalized * torch.log(r_normalized + 1e-8)).sum(dim=-1).mean()
         entropy_loss = -self.entropy_coef * entropy
         total_loss = td_loss + entropy_loss
+
+        # NaN 检查
+        if torch.isnan(total_loss) or torch.isnan(td_loss):
+            print(f"[Warning] NaN detected in compute_td_loss!")
+            print(f"  r_allocated: {r_allocated}")
+            print(f"  v_online: {v_online}")
+            print(f"  v_target_next: {v_target_next}")
+            print(f"  td_error: {td_error}")
+            # 返回安全的损失值
+            total_loss = td_loss + 1e-8
 
         # 构建诊断指标
         metrics = {
@@ -521,8 +544,8 @@ class RewardAllocatorAgent:
         self,
         train_buffer: TrainingBuffer ,
         gamma: float = 0.99,
-        v_online: np.ndarray = None,
-        v_target_next: np.ndarray = None,
+        v_online = None,
+        v_target_next = None,
     ) -> dict:
         """
         训练一步
@@ -532,25 +555,36 @@ class RewardAllocatorAgent:
             actions: [N+1, action_dim] (shifted: [zeros] + [a_0...a_N])
             terminal_reward: float
             gamma: float
-            v_online: [N+1] (可选)
-            v_target_next: [N+1] (可选)
+            v_online: [N+1] (可选)，支持 torch.Tensor 或 np.ndarray
+            v_target_next: [N+1] (可选)，支持 torch.Tensor 或 np.ndarray
         """
         self.network.train()
 
-        # 转为 tensor
+        # 转为 tensor（保持梯度连接）
         if v_online is not None:
-            v_online_t = torch.FloatTensor(v_online).to(self.device)
+            if not isinstance(v_online, torch.Tensor):
+                v_online_t = torch.FloatTensor(v_online).to(self.device)
+            else:
+                v_online_t = v_online.to(self.device)
         else:
             v_online_t = None
         if v_target_next is not None:
-            v_target_next_t = torch.FloatTensor(v_target_next).to(self.device)
+            if not isinstance(v_target_next, torch.Tensor):
+                v_target_next_t = torch.FloatTensor(v_target_next).to(self.device)
+            else:
+                v_target_next_t = v_target_next.to(self.device)
         else:
             v_target_next_t = None
+        # gamma 转为 tensor
+        if not isinstance(gamma, torch.Tensor):
+            gamma_tensor = torch.tensor(gamma, dtype=torch.float32, device=self.device)
+        else:
+            gamma_tensor = gamma.to(self.device)
 
         # 前向传播
         self.optimizer.zero_grad()
         loss, metrics = self.network.compute_td_loss(
-            train_buffer, gamma, v_online_t, v_target_next_t,
+            train_buffer, gamma_tensor, v_online_t, v_target_next_t,
         )
 
         # 反向传播
