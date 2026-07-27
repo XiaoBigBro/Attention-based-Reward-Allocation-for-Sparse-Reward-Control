@@ -28,7 +28,7 @@ def unpack_obs(obs: dict) -> np.ndarray:
 # ============================================================================
 #1
 class Actor(nn.Module):
-    """Gaussian 策略网络，输出 mean 和 log_std"""
+    """Gaussian 策略网络，输出 tanh 压缩的动作和 log_std"""
     def __init__(self, obs_dim: int, action_dim: int, hidden_dims: List[int],
                  log_std_min: float, log_std_max: float, log_std_init: float):
         super().__init__()
@@ -43,11 +43,43 @@ class Actor(nn.Module):
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
 
-    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """返回 tanh 动作、原始动作的 log_prob、log_std,采样用"""
         features = self.net(obs)
         mean = self.mean(features)
         log_std = torch.clamp(self.log_std, self.log_std_min, self.log_std_max)
-        return mean, log_std
+        std = log_std.exp()
+
+        # 采样
+        dist = torch.distributions.Normal(mean, std)
+        raw_action = dist.rsample()  # 原始动作
+        action = torch.tanh(raw_action)  # tanh 压缩到 [-1, 1]
+
+        # 修正 log_prob（补偿 tanh 压缩带来的雅可比行列式）
+        # log π(a|o) = log π_raw(u|o) - Σ log(1 - tanh²(u) + ε)
+        log_prob = dist.log_prob(raw_action).sum(dim=-1)
+        log_prob -= (1.0 - action.pow(2) + 1e-6).log().sum(dim=-1)
+
+        return action, log_prob, log_std, mean
+
+    def get_log_prob(self, obs: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """给定动作，计算 log_prob（用于训练）"""
+        features = self.net(obs)
+        mean = self.mean(features)
+        log_std = torch.clamp(self.log_std, self.log_std_min, self.log_std_max)
+        std = log_std.exp()
+
+        # 反 tanh：从 action 得到 raw_action
+        # tanh(u) = a => u = atanh(a) = 0.5 * ln((1+a)/(1-a))
+        # 使用 log1p 公式，数值更稳定
+        actions_safe = torch.clamp(actions, -0.999, 0.999)
+        raw_actions = 0.5 * (torch.log1p(actions_safe) - torch.log1p(-actions_safe))
+
+        dist = torch.distributions.Normal(mean, std)
+        log_prob = dist.log_prob(raw_actions).sum(dim=-1)
+        log_prob -= (1.0 - actions_safe.pow(2) + 1e-6).log().sum(dim=-1)
+
+        return log_prob
 
 #1
 class Critic(nn.Module):
@@ -85,20 +117,16 @@ class PPONetwork(nn.Module):
 
     #获取动作
     def get_action(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """获取动作及相关信息"""
-        mean, log_std = self.actor(obs)
-        dist = torch.distributions.Normal(mean, log_std.exp())
-        action = dist.rsample()
-        log_prob = dist.log_prob(action).sum(dim=-1)
+        """获取动作及相关信息（tanh 压缩后）"""
+        action, log_prob, log_std , mean= self.actor(obs)
         value = self.critic(obs)
-        return action, log_prob, value, mean, log_std
+        return action, log_prob, value, log_std, mean
 
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
         return self.critic(obs)
 
     def get_target_value(self, obs: torch.Tensor) -> torch.Tensor:
         return self.target_critic(obs)
-
 
 # ============================================================================
 # 缓冲区
@@ -117,6 +145,7 @@ class RawTrajectoryBuffer:
         log_probs:    N      (每个 transition 的 log π(a_t | s_t))
         values:       N      (每个 transition 的 V(s_t))
         terminal_reward: 标量
+        step_rewards: List[float] = field(default_factory=list)#每个步骤的奖励
     """
     observations: List[np.ndarray] = field(default_factory=list)
     actions: List[np.ndarray] = field(default_factory=list)
@@ -213,8 +242,8 @@ def compute_gae(
     values: List[float],
     next_values: List[float],
     dones: List[bool],
-    gamma: float = 0.99,
-    lam: float = 0.95,
+    gamma: float ,
+    lam: float ,
 ) -> Tuple[List[float], List[float]]:
     """
     δ_t = r_t + γ * V(s_{t+1}) - V(s_t)

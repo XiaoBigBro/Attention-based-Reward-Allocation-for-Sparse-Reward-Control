@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
+import gymnasium as gym
 
 from curriculum import AdaptiveCurriculumManager
 from fetch_env import make_fetch_env, get_env_obs_dim, get_env_action_dim
@@ -36,46 +37,89 @@ class TrainingConfig:
     """训练配置：包含所有可调超参数，供 PPOTrainerWithAllocator 使用"""
     # 环境
     env_id: str = "FetchReach-v4"
-    seed: int = 42
+    seed: int = 111
 
     # PPO 网络
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
-    log_std_min: float = -3.0#策略网络log标准差最小值
-    log_std_max: float = 1.5#策略网络log标准差最大值
-    log_std_init: float = 1.0#策略网络log标准差初始值
+    log_std_min: float = -2.0#策略网络log标准差最小值
+    log_std_max: float = 2.0#策略网络log标准差最大值
+    log_std_init: float = 1.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练
-    gamma: float = 0.99#折扣因子
-    lam: float = 0.98#GAE参数
-    clip_eps: float = 0.2#PPO裁剪参数
+    '''
+    gamma 控制的是“未来奖励的折现速度”。
+    调小 gamma（比如 0.97）会让未来奖励衰减更快，
+    实际上也是在“缩短”价值估计的依赖长度，也能起到一定的稳定作用。
+    公式：G_t = r_t + gamma * G_{t+1} + gamma^2 * G_{t+2} + ... + gamma^n * G_{t+n}
+    '''
+    gamma: float = 0.99#折扣因子,控制未来奖励的权重
+
+    '''
+    决定了你信任多少步的 TD 误差。但是分配网络不稳定，也就导致TD误差不准确，
+    所以lam越小，策略更新越稳定。
+    公式：A_t = delta_t + gamma * lam * A_{t+1} + gamma^2 * lam^2 * A_{t+2} + ... + gamma^n * lam^n * A_{t+n}
+    '''
+    lam: float = 0.9#GAE参数
+
+    clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
+
+    '''
+    鼓励策略不要过早变“确定”。也就是说，
+    即使网络想减小 log_std 来“利用”，entropy_coef 也会“拉它一把”，让它保留一定的随机性。
+    log_std 是 “策略自己决定的探索力度”。
+    entropy_coef 是 “外部强推的探索压力”。
+    '''
     entropy_coef: float = 0.1  # 熵正则化系数
-    actor_lr: float = 1e-4  # 策略网络学习率
-    critic_lr: float = 3e-4  # 价值网络学习率
-    ppo_epochs: int = 6#PPO训练epochs
-    critic_updates_per_epoch: int = 2#价值网络更新次数
+
+    actor_lr: float = 3e-4  # 策略网络学习率
+    critic_lr: float = 1e-3  # 价值网络学习率
+
+    '''
+    PPO训练epochs,越大样本利用率越高，但训练时间越长容易过拟合，
+    #越小训练时间越短，但样本利用率越低
+    '''
+    ppo_epochs: int = 6
+
+    '''
+    如果发现 Critic Loss 一直很高，说明价值网络学得不够快，
+    可以把 critic_updates_per_epoch 调到 6-8。
+    '''
+    critic_updates_per_epoch: int = 6#价值网络更新次数
+
     max_grad_norm: float = 0.5#最大梯度范数，防止梯度爆炸
+
+    '''
+    价值估计震荡严重 降低 value_clip_eps（如 0.1），降低 tau（如 0.005）
+    '''
+    value_clip_eps: float = 0.2#价值裁剪 epsilon，防止价值估计过拟合
+
+    '''
+    tau=0.01 是 DQN/PPO 的标准值，稳定可靠。如果训练震荡，可以降到 0.005。
+    '''
     tau: float = 0.01#目标网络更新参数
 
     # 奖励分配网络
-    alloc_d_model: int = 128#奖励分配网络隐藏层维度
-    alloc_num_heads: int = 4#奖励分配网络头数
-    alloc_num_layers: int = 2#奖励分配网络层数
-    alloc_d_ff: int = 256#奖励分配网络前馈网络隐藏层维度
+    alloc_d_model: int = 256#奖励分配网络隐藏层维度
+    alloc_num_heads: int = 8#奖励分配网络头数
+    alloc_num_layers: int = 4#奖励分配网络层数
+    alloc_d_ff: int = 512#奖励分配网络前馈网络隐藏层维度，如果分配网络学得慢，可以调大
     alloc_dropout: float = 0.1#奖励分配网络dropout率
     alloc_entropy_coef: float = 0.05#奖励分配网络熵正则化系数
-    alloc_lr: float = 1e-3#奖励分配网络学习率
+    alloc_lr: float = 5e-4#奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
     max_seq_len: int = 200#奖励分配网络最大序列长度
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
     curriculum_promote_threshold: float = -10.0#课程学习提升阈值
-    curriculum_demote_threshold: float = -30.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 1000#课程学习提升冷却期
+    curriculum_demote_threshold: float = -40.0#课程学习降级阈值
+    curriculum_promote_cooldown: int = 2000#课程学习提升冷却期
     curriculum_demote_cooldown: int = 200#课程学习降级冷却期
+    curriculum_level: int = 0#课程学习初始等级
+
     # 训练流程
     total_episodes: int = 100000
     log_interval: int = 10#日志间隔
-    save_interval: int = 2000#保存间隔
+    save_interval: int = 5000#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
     device: str = "cuda" if torch.cuda.is_available() else "cpu"  # 设备（自动检测）
 
@@ -104,7 +148,7 @@ class TrainingMetrics:
     curriculum_level: int = 0#课程学习等级
     curriculum_changed: str = ""#课程学习变化
     learning_rate: float = 0.0#学习率
-
+    log_std: float = 1.0#策略网络的log标准差
 
 # ============================================================================
 # 1. 训练器
@@ -138,7 +182,7 @@ class PPOTrainerWithAllocator:
         # 奖励记录文件（按种子区分）
         self.rewards_file = f"{self.save_dir}/training_rewards.txt"
         with open(self.rewards_file, 'w') as f:
-            f.write("episode,terminal_reward,curriculum_level\n")
+            f.write("episode,terminal_reward,curriculum_level,policy_loss,value_loss,entropy_loss,alloc_loss,log_std\n")
 
         # 创建设备
         self.device = torch.device(config.device)
@@ -184,22 +228,23 @@ class PPOTrainerWithAllocator:
         )
         self.allocator_agent = RewardAllocatorAgent(alloc_config, self.device)
 
-        print("[3/5] 初始化课程学习管理器...")
+        print("[3/5] 初始化环境...")
+        self.env = make_fetch_env(
+            env_id=config.env_id,
+            curriculum_level=config.curriculum_level,  # 从最简单的难度开始
+        )
+        self.dense_reward = self.env._dense_reward#奖励模式
+        self.curriculum_level = self.env._curriculum_level#课程学习等级
+
+        print("[4/5] 初始化课程学习管理器...")
         self.curriculum_manager = AdaptiveCurriculumManager(
             window_size=config.curriculum_window_size,
             promote_threshold=config.curriculum_promote_threshold,
             demote_threshold=config.curriculum_demote_threshold,
             promote_cooldown=config.curriculum_promote_cooldown,
             demote_cooldown=config.curriculum_demote_cooldown,
+            current_level=self.curriculum_level,
         )
-
-        print("[4/5] 初始化环境...")
-        self.env = make_fetch_env(
-            env_id=config.env_id,
-            curriculum_level=0,  # 从最简单的难度开始
-        )
-        self.dense_reward = self.env._dense_reward#奖励模式
-        self.curriculum_level = self.env.curriculum_level#课程学习等级
         
         print("[5/5] 准备完成!")
         # 全局训练计数器
@@ -210,14 +255,14 @@ class PPOTrainerWithAllocator:
         obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            action, log_prob, value, mean, log_std = self.network.get_action(obs_t)
+            action, log_prob, value, log_std, mean = self.network.get_action(obs_t)
 
         return (
-            action.squeeze(0).cpu().numpy(),
-            mean.squeeze(0).cpu().numpy(),
-            log_std.squeeze(0).cpu().numpy(),
-            log_prob.item(),
-            value.item(),
+            action.squeeze(0).cpu().numpy(),  # 动作（tanh 后）
+            log_std.squeeze(0).cpu().numpy(),  # log_std
+            mean.squeeze(0).cpu().numpy(),  # mean
+            log_prob.item(),  # log_prob
+            value.item(),  # value
         )
 
     def get_entropy_coef(self) -> float:
@@ -238,7 +283,7 @@ class PPOTrainerWithAllocator:
         done = False
         while not done:
             # 获取动作
-            action, mean, log_std, log_prob, value = self._policy_fn(obs)
+            action,  log_std, mean, log_prob, value = self._policy_fn(obs)
 
             # 与环境交互
             next_obs, terminated, truncated, info = self.env.step(action)
@@ -362,19 +407,21 @@ class PPOTrainerWithAllocator:
         total_critic_updates = 0
 
         # 策略网络更新 ppo_epochs 次，价值网络更新 critic_updates_per_epoch * ppo_epochs 次
-        for _ in range(self.config.ppo_epochs):
+        for epoch in range(self.config.ppo_epochs):
             # ========== Actor 更新 ==========
             self.optimizer_actor.zero_grad()
-            mean, log_std = self.network.actor(states)
-            dist = torch.distributions.Normal(mean, log_std.exp())
-            new_log_probs = dist.log_prob(actions).sum(dim=-1)
-            entropy = dist.entropy().sum(dim=-1).mean()#熵损失
+            # 使用新的 get_log_prob 方法（包含 tanh 修正）
+            new_log_probs = self.network.actor.get_log_prob(states, actions)
+
+            # 计算熵（基于 log_std）
+            # entropy = (0.5 * (2.0 * np.pi * np.e * log_std.exp().pow(2))).log().sum(dim=-1).mean()
+            entropy = -new_log_probs.mean()
 
             ratio = torch.exp(new_log_probs - old_log_probs)
             surr1 = ratio * advantages
             surr2 = torch.clamp(ratio, 1 - self.config.clip_eps, 1 + self.config.clip_eps) * advantages
             policy_loss = -torch.min(surr1, surr2).mean()
-            entropy_loss = -current_entropy_coef * entropy#熵损失
+            entropy_loss = -current_entropy_coef * entropy  # 熵损失
             actor_loss = policy_loss + entropy_loss
 
             actor_loss.backward()
@@ -382,10 +429,24 @@ class PPOTrainerWithAllocator:
             self.optimizer_actor.step()
 
             # ========== Critic 更新（多次） ==========
+            # 价值裁剪：只对第一个 epoch 保存 old_values（用于裁剪参考）
+            if epoch == 0:
+                with torch.no_grad():
+                    old_values = self.network.get_value(states).squeeze(-1).detach()
+
             for _ in range(self.config.critic_updates_per_epoch):
                 self.optimizer_critic.zero_grad()
                 values = self.network.get_value(states).squeeze(-1)
-                value_loss = F.smooth_l1_loss(values, returns)
+                # 价值裁剪：限制 value 不能偏离 old_value 太远
+                values_clipped = torch.clamp(
+                    values,
+                    old_values - self.config.value_clip_eps,
+                    old_values + self.config.value_clip_eps,
+                )
+                # 使用裁剪后的价值计算损失（取较大的损失）
+                value_loss_unclipped = F.smooth_l1_loss(values, returns)
+                value_loss_clipped = F.smooth_l1_loss(values_clipped, returns)
+                value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
                 value_loss.backward()
                 nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.config.max_grad_norm)
                 self.optimizer_critic.step()
@@ -417,6 +478,26 @@ class PPOTrainerWithAllocator:
         if T == 0:
             return {"alloc_td_loss": 0, "alloc_entropy_loss": 0, "alloc_total_loss": 0}
 
+        # #region debug log
+        import json
+        log_path = "c:/Users/ZhYao/Desktop/Journal/No1/Experiments/0602/debug-03c78f.log"
+        try:
+            with open(log_path, "a") as f:
+                f.write(json.dumps({
+                    "sessionId": "03c78f",
+                    "location": "train_ppo_allocator.py:train_allocator_step:437",
+                    "message": "train_allocator_step input shapes",
+                    "data": {
+                        "T": T,
+                        "train_buffer_rewards_len": len(train_buffer.rewards),
+                        "train_buffer_states_len": len(train_buffer.states),
+                    },
+                    "timestamp": 1750829520000,
+                    "hypothesisId": "A"
+                }) + "\n")
+        except: pass
+        # #endregion
+
         # 构造 N+1 个 states: [s_0, ..., s_{N-1}] + [s_N]
         states_list = list(train_buffer.states) + [train_buffer.next_states[-1]]
         states_padded = np.array(states_list, dtype=np.float32)
@@ -433,6 +514,27 @@ class PPOTrainerWithAllocator:
         # 保持为 tensor 以支持梯度计算
         v_online = v_all[:-1]  # [N]
         v_target_next = v_target_all[1:]  # [N]，最后一步 V(s_N) 用于 bootstrap
+
+        # #region debug log
+        try:
+            with open(log_path, "a") as f:
+                f.write(json.dumps({
+                    "sessionId": "03c78f",
+                    "location": "train_ppo_allocator.py:train_allocator_step:461",
+                    "message": "v_online/v_target_next after slicing",
+                    "data": {
+                        "v_all_len": len(v_all),
+                        "v_online_len": len(v_online),
+                        "v_target_next_len": len(v_target_next),
+                        "v_online_mean": v_online.mean().item(),
+                        "v_target_next_mean": v_target_next.mean().item(),
+                        "v_all": v_all.cpu().tolist(),
+                    },
+                    "timestamp": 1750829520001,
+                    "hypothesisId": "B"
+                }) + "\n")
+        except: pass
+        # #endregion
 
         # gamma 转为 tensor 以便与 tensor 相乘
         gamma_tensor = torch.tensor(self.config.gamma, dtype=torch.float32, device=self.device)
@@ -455,10 +557,24 @@ class PPOTrainerWithAllocator:
         """训练一个回合"""
         # 1. 采集轨迹
         raw_buffer = self.collect_trajectory()
-        # 获取当前奖励模式
-        self.dense_reward = self.env._dense_reward
 
-        if not self.dense_reward:
+        if self.dense_reward:
+            '''level 0 使用密集奖励模式'''
+            # 2. 奖励分配
+            allocated_rewards = np.array(raw_buffer.step_rewards)  # 转为 numpy array
+
+            # 3. 计算 GAE 并构建训练缓冲区
+            train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards, [])
+
+            # 4. 训练 PPO
+            ppo_metrics = self.train_ppo_step(train_buffer)
+
+            alloc_metrics = {
+            "alloc_td_loss": 0,
+            "alloc_entropy_loss": 0,
+            "alloc_total_loss": 0,
+            }
+
             '''level 1.2.3 使用稀疏奖励模式'''
             # 2. 奖励分配
             allocated_rewards,weights = self.allocate_rewards(raw_buffer)#长度为N
@@ -481,21 +597,26 @@ class PPOTrainerWithAllocator:
             alloc_metrics = self.train_allocator_step(train_buffer, self.network)
 
         else:
-            '''level 0 使用密集奖励模式'''
+            '''level 1.2.3 使用稀疏奖励模式'''
             # 2. 奖励分配
-            allocated_rewards = np.array(raw_buffer.step_rewards)  # 转为 numpy array
+            allocated_rewards,weights = self.allocate_rewards(raw_buffer)#长度为N
 
             # 3. 计算 GAE 并构建训练缓冲区
-            train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards, [])
+            train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards,weights)
 
-            # 4. 训练 PPO
-            ppo_metrics = self.train_ppo_step(train_buffer)
+            # 4. PPO 只在 level 2+ 训练，level 1 专门训练分配网络
+            if self.curriculum_level >= 2:
+                ppo_metrics = self.train_ppo_step(train_buffer)
+            else:
+                ppo_metrics = {
+                    "policy_loss": 0,
+                    "value_loss": 0,
+                    "entropy_loss": 0,
+                    "ppo_loss": 0,
+                }
 
-            alloc_metrics = {
-            "alloc_td_loss": 0,
-            "alloc_entropy_loss": 0,
-            "alloc_total_loss": 0,
-            }
+            # 5. 训练分配网络
+            alloc_metrics = self.train_allocator_step(train_buffer, self.network)
 
         # 更新课程学习
         terminal_reward = raw_buffer.terminal_reward
@@ -504,6 +625,8 @@ class PPOTrainerWithAllocator:
 
         if curriculum_changed:
             self.env.set_curriculum_level(self.curriculum_level)
+            # 获取当前奖励模式
+            self.dense_reward = self.env._dense_reward
 
         # 构建指标
         metrics = TrainingMetrics(
@@ -517,11 +640,18 @@ class PPOTrainerWithAllocator:
             **{**ppo_metrics, **alloc_metrics},
         )
 
+        # 获取当前 log_std
+        log_std_mean = self.network.actor.log_std.mean().item()
+        metrics.log_std = log_std_mean
+
         self.episode_count += 1
 
         # 每次回合结束都追加写入文件（课程切换时实时保存）
         with open(self.rewards_file, 'a') as f:
-            f.write(f"{self.episode_count},{terminal_reward},{self.curriculum_level}\n")
+            f.write(f"{self.episode_count},{terminal_reward},{self.curriculum_level},"
+                    f"{metrics.policy_loss:.6f},{metrics.value_loss:.6f},"
+                    f"{metrics.entropy_loss:.6f},{metrics.alloc_total_loss:.6f},"
+                    f"{metrics.log_std:.6f}\n")
 
         return metrics
 
@@ -643,9 +773,9 @@ def set_seed(seed: int):
 def main():
     """主函数"""
     # 解析命令行参数
-    parser = argparse.ArgumentParser(description="PPO + 奖励分配网络训练")
-    parser.add_argument("--seed", type=int, default=None, help="随机种子 (默认: 42)")
-    args = parser.parse_args()
+    parser = argparse.ArgumentParser(description="PPO + 奖励分配网络训练")#解析命令行参数，description=	设置帮助信息，运行 python script.py -h 时会显示这段文字
+    parser.add_argument("--seed", type=int, default=None, help="随机种子 (默认: 42)")#--seed 指定随机种子，default=None 表示没有指定时使用默认值 42
+    args = parser.parse_args()#解析命令行参数，返回一个Namespace对象，包含所有参数的值
 
     # 创建配置
     config = TrainingConfig()

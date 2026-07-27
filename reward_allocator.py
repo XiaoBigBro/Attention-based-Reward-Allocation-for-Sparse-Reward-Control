@@ -284,6 +284,8 @@ class RewardAllocator(nn.Module):
             nn.ReLU(),
             nn.Linear(d_model, d_model),
         )
+
+        #位置编码
         self.pos_encoder = PositionalEncoding(d_model, max_seq_len)
 
         # K 编码器: 动作分布 (mean + log_std) -> 简单 MLP
@@ -294,7 +296,7 @@ class RewardAllocator(nn.Module):
             nn.Linear(d_model, d_model),
         )
 
-        # V 编码器: 动作编码 + 位置编码 (不使用自注意力)
+        # V 编码器: 动作编码 
         self.action_encoder = nn.Sequential(
             nn.Linear(action_dim, d_model),
             nn.ReLU(),
@@ -369,22 +371,95 @@ class RewardAllocator(nn.Module):
         前向输出 weights: [N] (位置 1...N 对应 transition 0...N-1)
         TD 计算时需要把 v_online/v_target_next 对齐到 [N]
         """
-        # v_online/v_target_next: [B, N]（已是对齐到 N 的形状）
-        # weights: [B, N]，对应 transition 0...N-1
+        # #region debug log
+        import json
+        log_path = "c:/Users/ZhYao/Desktop/Journal/No1/Experiments/0602/debug-03c78f.log"
+        try:
+            with open(log_path, "a") as f:
+                f.write(json.dumps({
+                    "sessionId": "03c78f",
+                    "location": "reward_allocator.py:compute_td_loss:375",
+                    "message": "Input shapes check",
+                    "data": {
+                        "v_online_shape": list(v_online.shape) if v_online is not None else None,
+                        "v_target_next_shape": list(v_target_next.shape) if v_target_next is not None else None,
+                        "train_buffer_rewards_len": len(train_buffer.rewards),
+                    },
+                    "timestamp": 1750828320000,
+                    "hypothesisId": "A"
+                }) + "\n")
+        except: pass
+        # #endregion
+
         # train_buffer.rewards 是 list，需要转换为 tensor
         r_allocated_list = train_buffer.rewards
         if isinstance(r_allocated_list, list):
             r_allocated = torch.FloatTensor(r_allocated_list).to(v_online.device)
         else:
             r_allocated = r_allocated_list
+
+        # #region debug log
+        try:
+            with open(log_path, "a") as f:
+                f.write(json.dumps({
+                    "sessionId": "03c78f",
+                    "location": "reward_allocator.py:compute_td_loss:395",
+                    "message": "TD loss computation",
+                    "data": {
+                        "r_allocated_shape": list(r_allocated.shape),
+                        "r_allocated_mean": r_allocated.mean().item(),
+                        "r_allocated_std": r_allocated.std().item(),
+                        "r_allocated_sum": r_allocated.sum().item(),
+                        "r_allocated_first5": r_allocated[:5].cpu().tolist() if len(r_allocated) > 5 else r_allocated.cpu().tolist(),
+                    },
+                    "timestamp": 1750828320001,
+                    "hypothesisId": "B"
+                }) + "\n")
+        except: pass
+        # #endregion
+
         # gamma 转为 tensor
         if not isinstance(gamma, torch.Tensor):
             gamma_tensor = torch.tensor(gamma, dtype=torch.float32, device=v_online.device)
         else:
             gamma_tensor = gamma.to(v_online.device)
-        td_target = r_allocated + gamma_tensor * v_target_next  # [B, N]
-        td_error = td_target - v_online  # [B, N]
+
+        # 检查 v_online 维度：如果长度是 N+1，需要取前 N 个
+        if v_online is not None and len(v_online) == len(r_allocated) + 1:
+            v_online_for_td = v_online[:-1]
+        else:
+            v_online_for_td = v_online
+
+        if v_target_next is not None and len(v_target_next) == len(r_allocated) + 1:
+            v_target_for_td = v_target_next[:-1]
+        else:
+            v_target_for_td = v_target_next
+
+        td_target = r_allocated + gamma_tensor * v_target_for_td
+        td_error = td_target - v_online_for_td
         td_loss = (td_error ** 2).mean()
+
+        # #region debug log
+        try:
+            with open(log_path, "a") as f:
+                f.write(json.dumps({
+                    "sessionId": "03c78f",
+                    "location": "reward_allocator.py:compute_td_loss:425",
+                    "message": "TD error check",
+                    "data": {
+                        "v_online_mean": v_online_for_td.mean().item() if v_online_for_td is not None else 0,
+                        "v_target_mean": v_target_for_td.mean().item() if v_target_for_td is not None else 0,
+                        "td_target_mean": td_target.mean().item(),
+                        "td_error_mean": td_error.mean().item(),
+                        "td_error_std": td_error.std().item(),
+                        "td_loss": td_loss.item(),
+                        "gamma": gamma_tensor.item(),
+                    },
+                    "timestamp": 1750828320002,
+                    "hypothesisId": "C"
+                }) + "\n")
+        except: pass
+        # #endregion
 
         # 熵正则化：使用 softmax 归一化后的 weights 作为分布
         # 确保 r_allocated 是正数（通过绝对值和 softmax）来计算熵
@@ -499,7 +574,7 @@ class RewardAllocatorAgent:
             dropout=config.dropout,
             entropy_coef=config.entropy_coef,
             max_seq_len=config.max_seq_len,#最大序列长度
-        ).to(device)
+        ).to(self.device)
 
         # 优化器
         self.optimizer = torch.optim.Adam(
@@ -507,7 +582,7 @@ class RewardAllocatorAgent:
             lr=config.learning_rate,
         )
 
-        # 统计信息
+        # 统计信息,记录训练步数
         self.step_count = 0
 
     def allocate(

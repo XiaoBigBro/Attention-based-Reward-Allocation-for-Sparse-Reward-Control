@@ -105,6 +105,7 @@ class AdaptiveCurriculumManager:
         demote_threshold: float,
         promote_cooldown: int,
         demote_cooldown: int,
+        current_level: int,
     ):
         self.window_size = window_size
         self.promote_threshold = promote_threshold
@@ -112,7 +113,7 @@ class AdaptiveCurriculumManager:
         self.promote_cooldown = promote_cooldown
         self.demote_cooldown = demote_cooldown
 
-        self.current_level: int = 0
+        self.current_level: int = current_level
         self.episode_count: int = 0
         self.level_episode_counts: Dict[int, int] = {i: 0 for i in range(NUM_CURRICULUM_LEVELS)}
 
