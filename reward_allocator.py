@@ -371,123 +371,31 @@ class RewardAllocator(nn.Module):
         前向输出 weights: [N] (位置 1...N 对应 transition 0...N-1)
         TD 计算时需要把 v_online/v_target_next 对齐到 [N]
         """
-        # #region debug log
-        import json
-        log_path = "c:/Users/ZhYao/Desktop/Journal/No1/Experiments/0602/debug-03c78f.log"
-        try:
-            with open(log_path, "a") as f:
-                f.write(json.dumps({
-                    "sessionId": "03c78f",
-                    "location": "reward_allocator.py:compute_td_loss:375",
-                    "message": "Input shapes check",
-                    "data": {
-                        "v_online_shape": list(v_online.shape) if v_online is not None else None,
-                        "v_target_next_shape": list(v_target_next.shape) if v_target_next is not None else None,
-                        "train_buffer_rewards_len": len(train_buffer.rewards),
-                    },
-                    "timestamp": 1750828320000,
-                    "hypothesisId": "A"
-                }) + "\n")
-        except: pass
-        # #endregion
 
-        # train_buffer.rewards 是 list，需要转换为 tensor
-        r_allocated_list = train_buffer.rewards
-        if isinstance(r_allocated_list, list):
-            r_allocated = torch.FloatTensor(r_allocated_list).to(v_online.device)
+        # train_buffer.weights 是 list，需要转换为 tensor
+        if isinstance(train_buffer.weights, list):
+            weights_td = torch.tensor(train_buffer.weights, dtype=torch.float32, device=v_online.device)
         else:
-            r_allocated = r_allocated_list
+            weights_td = train_buffer.weights
+        terminal_reward = train_buffer.terminal_reward
 
-        # #region debug log
-        try:
-            with open(log_path, "a") as f:
-                f.write(json.dumps({
-                    "sessionId": "03c78f",
-                    "location": "reward_allocator.py:compute_td_loss:395",
-                    "message": "TD loss computation",
-                    "data": {
-                        "r_allocated_shape": list(r_allocated.shape),
-                        "r_allocated_mean": r_allocated.mean().item(),
-                        "r_allocated_std": r_allocated.std().item(),
-                        "r_allocated_sum": r_allocated.sum().item(),
-                        "r_allocated_first5": r_allocated[:5].cpu().tolist() if len(r_allocated) > 5 else r_allocated.cpu().tolist(),
-                    },
-                    "timestamp": 1750828320001,
-                    "hypothesisId": "B"
-                }) + "\n")
-        except: pass
-        # #endregion
-
-        # gamma 转为 tensor
-        if not isinstance(gamma, torch.Tensor):
-            gamma_tensor = torch.tensor(gamma, dtype=torch.float32, device=v_online.device)
-        else:
-            gamma_tensor = gamma.to(v_online.device)
-
-        # 检查 v_online 维度：如果长度是 N+1，需要取前 N 个
-        if v_online is not None and len(v_online) == len(r_allocated) + 1:
-            v_online_for_td = v_online[:-1]
-        else:
-            v_online_for_td = v_online
-
-        if v_target_next is not None and len(v_target_next) == len(r_allocated) + 1:
-            v_target_for_td = v_target_next[:-1]
-        else:
-            v_target_for_td = v_target_next
-
-        td_target = r_allocated + gamma_tensor * v_target_for_td
-        td_error = td_target - v_online_for_td
+        td_target = terminal_reward * weights_td + gamma * v_target_next
+        td_error = td_target - v_online
         td_loss = (td_error ** 2).mean()
-
-        # #region debug log
-        try:
-            with open(log_path, "a") as f:
-                f.write(json.dumps({
-                    "sessionId": "03c78f",
-                    "location": "reward_allocator.py:compute_td_loss:425",
-                    "message": "TD error check",
-                    "data": {
-                        "v_online_mean": v_online_for_td.mean().item() if v_online_for_td is not None else 0,
-                        "v_target_mean": v_target_for_td.mean().item() if v_target_for_td is not None else 0,
-                        "td_target_mean": td_target.mean().item(),
-                        "td_error_mean": td_error.mean().item(),
-                        "td_error_std": td_error.std().item(),
-                        "td_loss": td_loss.item(),
-                        "gamma": gamma_tensor.item(),
-                    },
-                    "timestamp": 1750828320002,
-                    "hypothesisId": "C"
-                }) + "\n")
-        except: pass
-        # #endregion
 
         # 熵正则化：使用 softmax 归一化后的 weights 作为分布
         # 确保 r_allocated 是正数（通过绝对值和 softmax）来计算熵
-        r_positive = torch.abs(r_allocated) + 1e-8  # 确保正数
+        r_positive = torch.abs(terminal_reward * weights_td) + 1e-8  # 确保正数
         r_normalized = torch.softmax(r_positive, dim=-1)  # softmax 归一化到 [0,1]
         entropy = -(r_normalized * torch.log(r_normalized + 1e-8)).sum(dim=-1).mean()
         entropy_loss = -self.entropy_coef * entropy
         total_loss = td_loss + entropy_loss
-
-        # NaN 检查
-        if torch.isnan(total_loss) or torch.isnan(td_loss):
-            print(f"[Warning] NaN detected in compute_td_loss!")
-            print(f"  r_allocated: {r_allocated}")
-            print(f"  v_online: {v_online}")
-            print(f"  v_target_next: {v_target_next}")
-            print(f"  td_error: {td_error}")
-            # 返回安全的损失值
-            total_loss = td_loss + 1e-8
 
         # 构建诊断指标
         metrics = {
             'td_loss': td_loss.item() if isinstance(td_loss, torch.Tensor) else td_loss,
             'entropy_loss': entropy_loss.item() if isinstance(entropy_loss, torch.Tensor) else entropy_loss,
             'total_loss': total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss,
-            'rewards_mean': r_allocated.mean().item() if hasattr(r_allocated, 'mean') else np.mean(r_allocated),
-            'rewards_std': r_allocated.std().item() if hasattr(r_allocated, 'std') else np.std(r_allocated),
-            'rewards_max': r_allocated.max().item() if hasattr(r_allocated, 'max') else np.max(r_allocated),
-            'rewards_min': r_allocated.min().item() if hasattr(r_allocated, 'min') else np.min(r_allocated),
             'v_online_mean': v_online.mean().item() if v_online is not None else 0.0,
             'v_target_mean': v_target_next.mean().item() if v_target_next is not None else 0.0,
             'td_error_mean': td_error.mean().item() if hasattr(td_error, 'mean') else np.mean(td_error),
@@ -602,20 +510,41 @@ class RewardAllocatorAgent:
             weights: [N] (位置 1...N 对应 transition 0...N-1)
             metrics: dict
         """
-        self.network.eval()  # 评估模式
         with torch.no_grad():
             states_t = torch.FloatTensor(states).to(self.device)
             actions_t = torch.FloatTensor(actions).to(self.device)
             actions_dist_t = torch.FloatTensor(actions_dist).to(self.device)
 
-            weights, metrics = self.network(states_t, actions_t, actions_dist_t)
-
-            # 转为 numpy
-            weights = weights.cpu().numpy()
+        weights, metrics = self.network(states_t, actions_t, actions_dist_t)
 
         return weights, metrics
 
-    def train_step(
+    # 模仿训练
+    def imitation_train_step(
+        self,
+        target_weights: torch.Tensor,
+        weights:torch.Tensor,
+    ) -> dict:
+        """
+        训练一步
+        """
+
+        self.network.train()
+
+        self.optimizer.zero_grad()
+        kl_loss = F.kl_div(torch.log(weights+1e-8), target_weights, reduction='batchmean', log_target=False)  # 形状差异
+        mse_loss = F.mse_loss(weights, target_weights)    # 数值差异
+        total_loss = kl_loss + 0.1 * mse_loss
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=0.5)
+        self.optimizer.step()
+        self.step_count += 1
+        return {"kl_loss": kl_loss.item(), "mse_loss": mse_loss.item(), "total_loss": total_loss.item()}
+
+
+
+    # TD 训练
+    def TD_train_step(
         self,
         train_buffer: TrainingBuffer ,
         gamma: float = 0.99,
@@ -670,6 +599,11 @@ class RewardAllocatorAgent:
         self.step_count += 1
 
         return metrics
+
+    def update_learning_rate(self, lr: float):
+        """更新优化器学习率"""
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
 
     def save(self, path: str):
         """保存模型"""
