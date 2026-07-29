@@ -80,7 +80,7 @@ class TrainingConfig:
     PPO训练epochs,越大样本利用率越高，但训练时间越长容易过拟合，
     #越小训练时间越短，但样本利用率越低
     '''
-    ppo_epochs: int = 6
+    ppo_epochs: int = 2
 
     '''
     如果发现 Critic Loss 一直很高，说明价值网络学得不够快，
@@ -111,14 +111,14 @@ class TrainingConfig:
     max_seq_len: int = 200#奖励分配网络最大序列长度
 
     # 模仿训练
-    temperature: float = 0.5#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）
+    temperature: float = 0.1#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）
     imitation_lr: float = 1e-3#模仿训练学习率
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
     curriculum_promote_threshold: float = -10.0#课程学习提升阈值
     curriculum_demote_threshold: float = -40.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 2000#课程学习提升冷却期
+    curriculum_promote_cooldown: int = 1000#课程学习提升冷却期
     curriculum_demote_cooldown: int = 200#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
@@ -420,10 +420,14 @@ class PPOTrainerWithAllocator:
             # 使用新的 get_log_prob 方法（包含 tanh 修正）
             new_log_probs = self.network.actor.get_log_prob(states, actions)
 
-            # 计算熵（基于 log_std）
-            entropy = -new_log_probs.mean()
+            # 计算对角高斯策略的熵（基于 log_std，不依赖具体采样动作）
+            # 公式: H = 0.5 * Σ(ln(2πσ²) + 1) = Σ(0.5*(ln(2π)+1) + ln(σ))
+            log_std = torch.clamp(self.network.actor.log_std, self.config.log_std_min, self.config.log_std_max)
+            entropy = (0.5 * (1.0 + np.log(2.0 * np.pi)) + log_std).sum()
 
             ratio = torch.exp(new_log_probs - old_log_probs)
+            # 限制极端比值，防止单次更新破坏策略
+            ratio = torch.clamp(ratio, 0.01, 5.0)
             surr1 = ratio * advantages
             surr2 = torch.clamp(ratio, 1 - self.config.clip_eps, 1 + self.config.clip_eps) * advantages
             policy_loss = -torch.min(surr1, surr2).mean()
@@ -762,21 +766,44 @@ class PPOTrainerWithAllocator:
         self.save(f"{self.save_dir}/final_model.pt")
 
     def save(self, path: str):
-        """保存模型"""
+        """保存模型（含课程管理器的完整内部状态）"""
         torch.save({
             "ppo_network": self.network.state_dict(),
             "allocator": self.allocator_agent.network.state_dict(),
-            "curriculum": self.curriculum_manager.get_stats(),
+            "curriculum_state": {
+                "current_level": self.curriculum_manager.current_level,
+                "episode_count": self.curriculum_manager.episode_count,
+                "cooldown_remaining": self.curriculum_manager.cooldown_remaining,
+                "since_last_change": self.curriculum_manager.since_last_change,
+                "reward_buffer": list(self.curriculum_manager.reward_window._buffer),
+                "level_episode_counts": dict(self.curriculum_manager.level_episode_counts),
+                "event_history": self.curriculum_manager.event_history,
+            },
             "config": self.config,
             "episode_count": self.episode_count,
         }, path)
 
     def load(self, path: str):
-        """加载模型"""
+        """加载模型（含课程管理器完整恢复）"""
         checkpoint = torch.load(path, map_location=self.device)
         self.network.load_state_dict(checkpoint["ppo_network"])
         self.allocator_agent.network.load_state_dict(checkpoint["allocator"])
         self.episode_count = checkpoint["episode_count"]
+
+        # 恢复课程管理器内部状态
+        cs = checkpoint["curriculum_state"]
+        self.curriculum_manager.current_level = cs["current_level"]
+        self.curriculum_manager.episode_count = cs["episode_count"]
+        self.curriculum_manager.cooldown_remaining = cs["cooldown_remaining"]
+        self.curriculum_manager.since_last_change = cs["since_last_change"]
+        # 恢复滑动窗口缓冲区
+        from collections import deque
+        self.curriculum_manager.reward_window._buffer = deque(
+            cs["reward_buffer"],
+            maxlen=self.curriculum_manager.reward_window.window_size,
+        )
+        self.curriculum_manager.level_episode_counts = cs["level_episode_counts"]
+        self.curriculum_manager.event_history = list(cs["event_history"])
 
 # ============================================================================
 # 2. 随机数种子设置

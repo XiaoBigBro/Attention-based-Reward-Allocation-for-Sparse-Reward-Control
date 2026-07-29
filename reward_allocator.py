@@ -383,12 +383,9 @@ class RewardAllocator(nn.Module):
         td_error = td_target - v_online
         td_loss = (td_error ** 2).mean()
 
-        # 熵正则化：使用 softmax 归一化后的 weights 作为分布
-        # 确保 r_allocated 是正数（通过绝对值和 softmax）来计算熵
-        r_positive = torch.abs(terminal_reward * weights_td) + 1e-8  # 确保正数
-        r_normalized = torch.softmax(r_positive, dim=-1)  # softmax 归一化到 [0,1]
-        entropy = -(r_normalized * torch.log(r_normalized + 1e-8)).sum(dim=-1).mean()
-        entropy_loss = -self.entropy_coef * entropy
+        # 熵正则化：直接对 weights 计算熵，最小化熵 = 鼓励权重集中在关键步骤
+        entropy = -(weights_td * torch.log(weights_td + 1e-8)).sum(dim=-1).mean()
+        entropy_loss = self.entropy_coef * entropy  # 正号：最小化熵
         total_loss = td_loss + entropy_loss
 
         # 构建诊断指标
@@ -498,7 +495,7 @@ class RewardAllocatorAgent:
         states: np.ndarray,
         actions: np.ndarray,
         actions_dist: np.ndarray,
-    ) -> Tuple[np.ndarray, dict]:
+    ) -> Tuple[torch.Tensor, dict]:
         """
         分配奖励
 
@@ -507,7 +504,7 @@ class RewardAllocatorAgent:
             actions: [N+1, action_dim] (shifted)
 
         输出:
-            weights: [N] (位置 1...N 对应 transition 0...N-1)
+            weights: [N] (位置 1...N 对应 transition 0...N-1), 保留计算图供训练
             metrics: dict
         """
         with torch.no_grad():

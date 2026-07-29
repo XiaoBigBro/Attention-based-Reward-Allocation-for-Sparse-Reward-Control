@@ -58,7 +58,8 @@ class Actor(nn.Module):
         # 修正 log_prob（补偿 tanh 压缩带来的雅可比行列式）
         # log π(a|o) = log π_raw(u|o) - Σ log(1 - tanh²(u) + ε)
         log_prob = dist.log_prob(raw_action).sum(dim=-1)
-        log_prob -= (1.0 - action.pow(2) + 1e-6).log().sum(dim=-1)
+        action_safe = torch.clamp(action, -0.999, 0.999)
+        log_prob -= (1.0 - action_safe.pow(2) + 1e-6).log().sum(dim=-1)
 
         return action, log_prob, log_std, mean
 
