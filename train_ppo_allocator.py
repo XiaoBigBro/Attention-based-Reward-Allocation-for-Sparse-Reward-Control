@@ -69,7 +69,7 @@ class TrainingConfig:
     log_std 是 “策略自己决定的探索力度”。
     entropy_coef 是 “外部强推的探索压力”。
     '''
-    entropy_coef: float = 0.001  # 熵正则化系数
+    entropy_coef: float = 0.01  # 熵正则化系数
 
     actor_lr: float = 3e-4  # 策略网络学习率
     critic_lr: float = 1e-3  # 价值网络学习率
