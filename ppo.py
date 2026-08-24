@@ -26,7 +26,6 @@ def unpack_obs(obs: dict) -> np.ndarray:
 # ============================================================================
 # 网络
 # ============================================================================
-#1
 class Actor(nn.Module):
     """Gaussian 策略网络，输出 tanh 压缩的动作和 log_std"""
     def __init__(self, obs_dim: int, action_dim: int, hidden_dims: List[int],
@@ -82,7 +81,6 @@ class Actor(nn.Module):
 
         return log_prob
 
-#1
 class Critic(nn.Module):
     """状态价值网络 V(s)"""
     def __init__(self, obs_dim: int, hidden_dims: List[int]):
@@ -98,7 +96,6 @@ class Critic(nn.Module):
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         return self.value_head(self.net(obs))
 
-#1
 class PPONetwork(nn.Module):
     """Actor-Critic 整合网络，含 target_critic 软更新"""
     def __init__(self, obs_dim: int, action_dim: int, hidden_dims: List[int],
@@ -205,7 +202,8 @@ class TrainingBuffer:
     advantages: List[float] = field(default_factory=list)
     returns: List[float] = field(default_factory=list)
     old_log_probs: List[float] = field(default_factory=list)
-    weights: List[float] = field(default_factory=list)
+    weights: torch.Tensor = None      # [N] tensor，分配网络权重（保留计算图）
+    weights_entropy: torch.Tensor = None  # scalar tensor，权重分布的熵（保留计算图）
     terminal_reward: float = 0.0
 
     def __len__(self) -> int:
@@ -219,8 +217,9 @@ class TrainingBuffer:
         self.advantages.clear()
         self.returns.clear()
         self.old_log_probs.clear()
+        self.weights = None
+        self.weights_entropy = None
         self.terminal_reward = 0.0
-        self.weights.clear()
 
     def to_tensors(self, device: str = "cuda") -> Dict[str, torch.Tensor]:
         return {

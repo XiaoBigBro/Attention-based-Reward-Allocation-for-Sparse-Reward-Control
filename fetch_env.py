@@ -20,7 +20,6 @@ import numpy as np
 
 NUM_CURRICULUM_LEVELS = 4  # 等级 0.1.2.3，其中0为密集奖励模式，1.2.3为稀疏奖励模式
 
-
 # 是一个代码生成器，它让你专注于定义“有哪些数据”（属性），
 # 而自动帮你生成“如何处理这些数据”（初始化、打印、比较等方法）
 @dataclass
@@ -28,36 +27,39 @@ class EnvCurriculumParams:
     """控制难度的参数（单位：米）。"""
     success_threshold: float = 0.15   #成功判定距离 d
     target_range: float = 0.15#目标区所在的位置范围大小
-    max_episode_steps: int = 100#最大回合步数
+    max_episode_steps: int = 80#最大回合步数
     dense_reward: bool = True#是否使用密集奖励模式
 
 CURRICULUM_PRESETS = {
-    0: EnvCurriculumParams(target_range=0.15, success_threshold=0.15, max_episode_steps=100,dense_reward=True),
-    1: EnvCurriculumParams(target_range=0.15, success_threshold=0.15, max_episode_steps=100,dense_reward=False),
-    2: EnvCurriculumParams(target_range=0.20, success_threshold=0.10, max_episode_steps=100,dense_reward=False),
-    3: EnvCurriculumParams(target_range=0.25, success_threshold=0.05, max_episode_steps=100,dense_reward=False),
+    0: EnvCurriculumParams(target_range=0.20, success_threshold=0.10, max_episode_steps=80,dense_reward=True),
+    1: EnvCurriculumParams(target_range=0.20, success_threshold=0.10, max_episode_steps=80,dense_reward=False),
+    2: EnvCurriculumParams(target_range=0.20, success_threshold=0.10, max_episode_steps=80,dense_reward=False),
+    3: EnvCurriculumParams(target_range=0.25, success_threshold=0.05, max_episode_steps=80,dense_reward=False),
 }
 
 
 # ---------------------------------------------------------------------------
 # 2. 奖励计算
 # ---------------------------------------------------------------------------
-
+#密集奖励函数
 def compute_step_reward(
     obs: dict,
+    threshold: float,
 ) -> float:
     """每步的即时奖励，基于末端与目标的距离计算。
 
-    距离越近，奖励越高（负距离作为奖励）。
+    公式: reward = exp(-dist * 5) + (1.0 if reached else 0.0) - 0.5
+    - dist < threshold 时视为到达目标区域（获得额外到达奖励）
+    - 远离目标时 reward < 0，接近/到达时 reward > 0
     """
-    achieved = obs.get("achieved_goal")
-    desired = obs.get("desired_goal")
-    if achieved is None or desired is None:
-        return 0.0
+    achieved = obs["achieved_goal"]
+    desired = obs["desired_goal"]
     dist = float(np.linalg.norm(achieved - desired))
-    return -dist
+    reached = dist < threshold
+    reward = np.exp(-dist * 5) + (1.0 if reached else 0.0)
+    return reward
 
-
+#最终奖励
 def compute_terminal_reward(
     step_rewards: list[float],
 ) -> float:
@@ -68,7 +70,7 @@ def compute_terminal_reward(
 # ---------------------------------------------------------------------------
 # 3. 核心 Wrapper
 # ---------------------------------------------------------------------------
-#1
+
 class EpisodicDwellRewardWrapper(gym.Wrapper):
     """
     将 FetchReach/Push 改造为可切换的稠密/稀疏奖励环境。
@@ -127,18 +129,23 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
     # ------------------------------------------------------------------
 
     def _sync_target_range(self) -> None:
-        #self 必须定义在括号中，才能在类的方法中使用
         """
-        将 target_range 写入底层 Fetch env 的 unwrapped，
-        使 _sample_goal() 采样到对应范围的目标。
+        将 target_range 和 distance_threshold 写入底层 Fetch env 的 unwrapped。
+
+        必须成功写入，否则立即报错，避免静默失败导致课程难度未生效。
         """
-        try:
-            unwrapped = self.unwrapped
-            if hasattr(unwrapped, "target_range"):
-                unwrapped.target_range = self._params.target_range
-        except Exception:
-            # FetchPush 等可能属性不同，静默忽略
-            pass
+        unwrapped = self.unwrapped
+        if not hasattr(unwrapped, "target_range"):
+            raise AttributeError(
+                f"底层环境 {type(unwrapped).__name__} 缺少 target_range 属性"
+            )
+        unwrapped.target_range = self._params.target_range
+
+        if not hasattr(unwrapped, "distance_threshold"):
+            raise AttributeError(
+                f"底层环境 {type(unwrapped).__name__} 缺少 distance_threshold 属性"
+            )
+        unwrapped.distance_threshold = self._params.success_threshold
 
     def _reset_episode_state(self) -> None:
         """reset() / 新回合开始时重置计数。"""
@@ -160,8 +167,8 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         # 丢弃底层 reward，用我们自己的
         obs, _, terminated, truncated, info = self.env.step(action)
 
-        # 计算每步的即时奖励（基于距离）
-        step_reward = compute_step_reward(obs)
+        # 计算每步的即时奖励（基于距离和当前等级的 success_threshold）
+        step_reward = compute_step_reward(obs, self._params.success_threshold)
 
         # 存储即时奖励
         self._step_rewards.append(step_reward)
@@ -174,9 +181,15 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         # 回合截断判断
         truncated = self._episode_step >= self._params.max_episode_steps
 
+        # 是否到达目标区域
+        achieved = obs["achieved_goal"]
+        desired = obs["desired_goal"]
+        reached = float(np.linalg.norm(achieved - desired)) < self._params.success_threshold
+
         # info 扩展
         info["step_reward"] = step_reward
         info["step_rewards"] = list(self._step_rewards)  # 所有即时奖励
+        info["reached"] = reached  # 当前步是否到达目标
         info["terminal_reward"] = compute_terminal_reward(self._step_rewards) if truncated else 0.0
         info["curriculum_level"] = self._curriculum_level
         info["use_dense_reward"] = self._dense_reward
@@ -190,7 +203,7 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
 # ---------------------------------------------------------------------------
 # 5. 环境工厂
 # ---------------------------------------------------------------------------
-#1
+
 def make_fetch_env(
     env_id: str ,
     curriculum_level: int ,
@@ -217,7 +230,7 @@ def make_fetch_env(
     base_env = gym.make(env_id, render_mode=render_mode, max_episode_steps=10000)
     wrapped = EpisodicDwellRewardWrapper(base_env, curriculum_level)
     return wrapped
-#1
+
 def get_env_obs_dim(env_id: str) -> int:
     """查询环境的观测维度（不创建渲染窗口）。"""
     dummy = gym.make(env_id, render_mode=None)
@@ -227,7 +240,7 @@ def get_env_obs_dim(env_id: str) -> int:
     finally:
         dummy.close()
     return dim
-#1
+
 def get_env_action_dim(env_id: str) -> int:
     """查询环境的动作维度（不创建渲染窗口）。"""
     dummy = gym.make(env_id, render_mode=None)

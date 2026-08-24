@@ -21,7 +21,7 @@ from fetch_env import (
 class SlidingWindowStats:
     """固定大小的滑动窗口，自动计算统计量。"""
 
-    def __init__(self, window_size: int = 50):
+    def __init__(self, window_size: int):
         self.window_size = window_size
         self._buffer: deque[float] = deque(maxlen=window_size)
 
@@ -108,8 +108,8 @@ class AdaptiveCurriculumManager:
         current_level: int,
     ):
         self.window_size = window_size
-        self.promote_threshold = promote_threshold
-        self.demote_threshold = demote_threshold
+        self.promote_threshold = promote_threshold#升级阈值
+        self.demote_threshold = demote_threshold#降级阈值
         self.promote_cooldown = promote_cooldown
         self.demote_cooldown = demote_cooldown
 
