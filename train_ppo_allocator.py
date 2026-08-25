@@ -72,7 +72,7 @@ class TrainingConfig:
     entropy_coef: float = 0.001  # 熵正则化系数
 
     actor_lr: float = 3e-4  # 策略网络学习率
-    critic_lr: float = 1e-3  # 价值网络学习率
+    critic_lr: float = 3e-4  # 价值网络学习率
     actor_lr_level2: float = 3e-5#课程学习等级2的策略网络学习率
     critic_lr_level2: float = 1e-4#课程学习等级2的价值网络学习率
 
@@ -86,7 +86,7 @@ class TrainingConfig:
     如果发现 Critic Loss 一直很高，说明价值网络学得不够快，
     可以把 critic_updates_per_epoch 调到 6-8。
     '''
-    critic_updates_per_epoch: int = 8#价值网络更新次数
+    critic_updates_per_epoch: int = 6#价值网络更新次数
 
     max_grad_norm: float = 0.5#最大梯度范数，防止梯度爆炸
 
@@ -98,7 +98,7 @@ class TrainingConfig:
     '''
     tau=0.01 是 DQN/PPO 的标准值，稳定可靠。如果训练震荡，可以降到 0.005。
     '''
-    tau: float = 0.02#目标网络更新参数
+    tau: float = 0.01#目标网络更新参数
 
     # 奖励分配网络
     alloc_d_model: int = 256#奖励分配网络隐藏层维度
