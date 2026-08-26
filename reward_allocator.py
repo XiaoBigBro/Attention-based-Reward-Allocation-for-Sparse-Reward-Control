@@ -547,7 +547,7 @@ class RewardAllocatorAgent:
     def TD_train_step(
         self,
         train_buffer: TrainingBuffer ,
-        gamma: float = 0.99,
+        gamma: float ,
         v_online = None,
         v_target_next = None,
     ) -> dict:
