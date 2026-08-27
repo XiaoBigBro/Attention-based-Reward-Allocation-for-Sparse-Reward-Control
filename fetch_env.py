@@ -29,8 +29,6 @@ class EnvCurriculumParams:
     target_range: float = 0.28#目标区所在的位置范围大小
     max_episode_steps: int = 80#最大回合步数
     dense_reward: bool = True#是否使用密集奖励模式
-    reward_k: float = 20.0#增量式密集奖励灵敏度系数：r = 1 + tanh(k * Δd)
-    reached_bonus: float = 1.2#到达目标区域后的恒定保持奖励：r_inside = 1 + reached_bonus
 
 CURRICULUM_PRESETS = {
     0: EnvCurriculumParams(target_range=0.28, success_threshold=0.08, max_episode_steps=80,dense_reward=True),
@@ -48,8 +46,6 @@ def compute_step_reward(
     prev_dist: float,
     cur_dist: float,
     threshold: float,
-    k: float,
-    reached_bonus: float = 1.2,
 ) -> float:
     """增量式密集奖励：推进奖励 + 到达保持奖励，恒正。
 
@@ -63,8 +59,9 @@ def compute_step_reward(
     """
     if cur_dist < threshold:
         # 已到达目标区域：恒定保持奖励（区内微小位移不计 Δd）
-        return 1.0 + reached_bonus
+        return 1.0 + 1.5
     delta = prev_dist - cur_dist
+    k = 20.0 if delta >= 0 else 50.0
     return 1.0 + float(np.tanh(k * delta))
 
 #最终奖励
@@ -193,8 +190,6 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         step_reward = compute_step_reward(
             self._prev_dist, cur_dist,
             self._params.success_threshold,
-            self._params.reward_k,
-            self._params.reached_bonus,
         )
         self._prev_dist = cur_dist
 
