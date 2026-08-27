@@ -42,7 +42,7 @@ class TrainingConfig:
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 0.5#策略网络log标准差最大值
-    log_std_init: float = 0.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = 0.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练
     '''
@@ -597,7 +597,6 @@ class PPOTrainerWithAllocator:
             '''level 0 使用密集奖励模式，ppo用密集奖励信号训练，分配网络用密集奖励做模仿训练'''
 
             train_buffers_list = []  # 存放多个 TrainingBuffer
-            # raw_buffers_list = []  # 存放多个 RawTrajectoryBuffer
 
             for _ in range(self.config.ppo_update_interval):
                 # 1. 采集轨迹
@@ -627,7 +626,6 @@ class PPOTrainerWithAllocator:
 
             # 4. 训练 PPO,用密集奖励信号训练
             ppo_metrics = self.train_ppo_step(train_buffers)
-            #ppo_metrics = {"policy_loss" "value_loss" "entropy_loss"}
 
         else:
 
