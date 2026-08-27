@@ -727,7 +727,7 @@ class PPOTrainerWithAllocator:
         with open(self.rewards_file, 'a') as f:
             f.write(f"{self.episode_count},{terminal_reward},{self.curriculum_level},"
                     f"{metrics.policy_loss:.6f},{metrics.value_loss:.6f},"
-                    f"{metrics.entropy_loss:.6f}")#,{metrics.alloc_kl_total_loss:.6f},"
+                    f"{metrics.entropy_loss:.6f}\n")#,{metrics.alloc_kl_total_loss:.6f},"
                     # f"{metrics.alloc_kl_loss:.6f},{metrics.alloc_mse_loss:.6f},"
                     # f"{metrics.alloc_td_loss:.6f},{metrics.alloc_entropy_loss:.6f},"
                     # f"{metrics.alloc_total_loss:.6f},{metrics.log_std:.6f}\n")
