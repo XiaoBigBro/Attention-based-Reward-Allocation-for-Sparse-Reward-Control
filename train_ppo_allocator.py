@@ -42,7 +42,7 @@ class TrainingConfig:
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 0.5#策略网络log标准差最大值
-    log_std_init: float = 0.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = 0.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练
     '''
@@ -60,7 +60,7 @@ class TrainingConfig:
     '''
     lam: float = 0.9#GAE参数
 
-    clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
+    clip_eps: float = 0.05#PPO裁剪参数,控制策略更新的稳定性.
 
     '''
     鼓励策略不要过早变“确定”。也就是说，
@@ -71,7 +71,7 @@ class TrainingConfig:
     entropy_coef: float = 0.001  # 熵正则化系数
 
     actor_lr: float = 3e-4  # 策略网络学习率
-    critic_lr: float = 3e-4  # 价值网络学习率
+    critic_lr: float = 1e-4  # 价值网络学习率
     actor_lr_level2: float = 3e-5#课程学习等级2的策略网络学习率
     critic_lr_level2: float = 1e-4#课程学习等级2的价值网络学习率
 
@@ -122,9 +122,9 @@ class TrainingConfig:
     curriculum_level: int = 0#课程学习初始等级
 
     # 训练流程
-    total_episodes: int = 100000
+    total_episodes: int = 10000
     log_interval: int = 10#日志间隔
-    save_interval: int = 5000#保存间隔
+    save_interval: int = 1000#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
     device: str = "cuda" if torch.cuda.is_available() else "cpu"  # 设备（自动检测）
 
@@ -616,9 +616,9 @@ class PPOTrainerWithAllocator:
                 # 3. 计算 GAE 并构建训练缓冲区
                 train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards, [],None)
 
-                # 5. 训练分配网络（模仿训练），用密集奖励信号训练
-                alloc_metrics = self.train_allocator_step_imitation(raw_buffer)
-                # alloc_metrics = {"alloc_kl_loss" "alloc_mse_loss","alloc_kl_total_loss"}
+                # # 5. 训练分配网络（模仿训练），用密集奖励信号训练
+                # alloc_metrics = self.train_allocator_step_imitation(raw_buffer)
+                # # alloc_metrics = {"alloc_kl_loss" "alloc_mse_loss","alloc_kl_total_loss"}
 
                 train_buffers_list.append(train_buffer)
 
@@ -714,8 +714,8 @@ class PPOTrainerWithAllocator:
             episode_length=len(raw_buffer) - 1,  # observations 有 N+1 个，transition 数为 N
             curriculum_level=self.curriculum_level,
             curriculum_changed=str(curriculum_changed),
-            **{**ppo_metrics, **alloc_metrics},
-        )
+            **{**ppo_metrics},
+        )#,**alloc_metrics
 
         # 获取当前 log_std
         log_std_mean = self.network.actor.log_std.mean().item()
@@ -727,10 +727,10 @@ class PPOTrainerWithAllocator:
         with open(self.rewards_file, 'a') as f:
             f.write(f"{self.episode_count},{terminal_reward},{self.curriculum_level},"
                     f"{metrics.policy_loss:.6f},{metrics.value_loss:.6f},"
-                    f"{metrics.entropy_loss:.6f},{metrics.alloc_kl_total_loss:.6f},"
-                    f"{metrics.alloc_kl_loss:.6f},{metrics.alloc_mse_loss:.6f},"
-                    f"{metrics.alloc_td_loss:.6f},{metrics.alloc_entropy_loss:.6f},"
-                    f"{metrics.alloc_total_loss:.6f},{metrics.log_std:.6f}\n")
+                    f"{metrics.entropy_loss:.6f}")#,{metrics.alloc_kl_total_loss:.6f},"
+                    # f"{metrics.alloc_kl_loss:.6f},{metrics.alloc_mse_loss:.6f},"
+                    # f"{metrics.alloc_td_loss:.6f},{metrics.alloc_entropy_loss:.6f},"
+                    # f"{metrics.alloc_total_loss:.6f},{metrics.log_std:.6f}\n")
 
         return metrics
 
@@ -780,12 +780,12 @@ class PPOTrainerWithAllocator:
                 pbar.write(f"  Actor损失: {metrics.policy_loss:.4f}")
                 pbar.write(f"  Critic损失: {metrics.value_loss:.4f}")
                 pbar.write(f"  Actor熵损失: {metrics.entropy_loss:.4f}")
-                pbar.write(f"  分配网络td损失: {metrics.alloc_td_loss:.4f}")
-                pbar.write(f"  分配网络熵损失: {metrics.alloc_entropy_loss:.4f}")
-                pbar.write(f"  分配网络总损失: {metrics.alloc_total_loss:.4f}")
-                pbar.write(f"  分配网络kl损失: {metrics.alloc_kl_loss:.4f}")
-                pbar.write(f"  分配网络mes损失: {metrics.alloc_mse_loss:.4f}")
-                pbar.write(f"  分配网络模仿训练总损失: {metrics.alloc_kl_total_loss:.4f}")
+                # pbar.write(f"  分配网络td损失: {metrics.alloc_td_loss:.4f}")
+                # pbar.write(f"  分配网络熵损失: {metrics.alloc_entropy_loss:.4f}")
+                # pbar.write(f"  分配网络总损失: {metrics.alloc_total_loss:.4f}")
+                # pbar.write(f"  分配网络kl损失: {metrics.alloc_kl_loss:.4f}")
+                # pbar.write(f"  分配网络mes损失: {metrics.alloc_mse_loss:.4f}")
+                # pbar.write(f"  分配网络模仿训练总损失: {metrics.alloc_kl_total_loss:.4f}")
 
             # 课程升级时保存
             if metrics.curriculum_changed == "promote":

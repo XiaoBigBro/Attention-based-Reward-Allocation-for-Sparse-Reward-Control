@@ -83,18 +83,22 @@ class Actor(nn.Module):
 
 class Critic(nn.Module):
     """状态价值网络 V(s)"""
-    def __init__(self, obs_dim: int, hidden_dims: List[int]):
+    def __init__(self, obs_dim: int):
         super().__init__()
         layers = []
         prev_dim = obs_dim
-        for dim in hidden_dims:
-            layers.extend([nn.Linear(prev_dim, dim), nn.ReLU()])
-            prev_dim = dim
-        self.net = nn.Sequential(*layers)
-        self.value_head = nn.Linear(prev_dim, 1)
+        self.net = nn.Sequential(
+            nn.Linear(prev_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.value_head(self.net(obs))
+        return self.net(obs)
 
 class PPONetwork(nn.Module):
     """Actor-Critic 整合网络，含 target_critic 软更新"""
@@ -104,8 +108,8 @@ class PPONetwork(nn.Module):
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.actor = Actor(obs_dim, action_dim, hidden_dims, log_std_min, log_std_max, log_std_init)
-        self.critic = Critic(obs_dim, hidden_dims)
-        self.target_critic = Critic(obs_dim, hidden_dims)
+        self.critic = Critic(obs_dim)
+        self.target_critic = Critic(obs_dim)
         self.target_critic.load_state_dict(self.critic.state_dict())
 
     #软更新
