@@ -195,7 +195,7 @@ class PPOTrainerWithAllocator:
         # 奖励记录文件（按种子区分）
         self.rewards_file = f"{self.save_dir}/training_rewards.txt"
         with open(self.rewards_file, 'w') as f:
-            f.write("episode,terminal_reward,curriculum_level,policy_loss,value_loss,entropy_loss,alloc_kl_total_loss,alloc_kl_loss,alloc_mse_loss,alloc_td_loss,alloc_entropy_loss,alloc_total_loss,log_std\n")
+            f.write("episode,terminal_reward,curriculum_level,policy_loss,value_loss,entropy_loss,alloc_kl_total_loss,alloc_kl_loss,alloc_mse_loss,alloc_td_loss,alloc_entropy_loss,alloc_total_loss,alloc_w_rew_corr\n")
 
         # 创建设备
         self.device = torch.device(config.device)
@@ -829,7 +829,7 @@ class PPOTrainerWithAllocator:
                     f"{metrics.entropy_loss:.6f},{metrics.alloc_kl_total_loss:.6f},"
                     f"{metrics.alloc_kl_loss:.6f},{metrics.alloc_mse_loss:.6f},"
                     f"{metrics.alloc_td_loss:.6f},{metrics.alloc_entropy_loss:.6f},"
-                    f"{metrics.alloc_total_loss:.6f},{metrics.log_std:.6f}\n")
+                    f"{metrics.alloc_total_loss:.6f},{metrics.alloc_w_rew_corr:.6f}\n")
 
         return metrics
 
