@@ -125,10 +125,8 @@ class MultiHeadAttention(nn.Module):
 
         scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.d_k ** 0.5)
 
-        # Causal Mask: 防止看到未来位置
+        # Causal Mask: 防止看到未来位置（本任务为事后分配，统一不使用）
         if self.use_causal_mask:
-            # q_len = seq_len_q, k_len = seq_len_k
-            # 创建下三角掩码 (q_idx >= k_idx 时允许，即 s_{t+1} 只能看到 a_0..a_t)
             causal = torch.tril(
                 torch.ones(seq_len_q, seq_len_k, device=query.device, dtype=torch.bool),
                 diagonal=0
@@ -196,7 +194,7 @@ class CrossAttentionLayer(nn.Module):
 
     结构: Cross-Attention → Add & LayerNorm → FFN → Add & LayerNorm
 
-    注意: 默认使用因果掩蔽，防止状态看到未来的动作
+    注意: 本任务为事后分配（episode 已结束、最终奖励已知），不使用因果掩蔽
     """
 
     def __init__(
@@ -210,7 +208,6 @@ class CrossAttentionLayer(nn.Module):
         super().__init__()
 
         # 交叉注意力: Query 来自 state, Key/Value 来自 action
-        # use_causal_mask=True: Q 在 t 时刻只能看到 V 的 0..t 位置（不能看未来动作）
         self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout, bias=True, use_causal_mask=use_causal_mask)
         self.norm1 = nn.LayerNorm(d_model)
 
@@ -249,23 +246,21 @@ class RewardAllocator(nn.Module):
     """基于注意力机制的奖励分配网络。
 
     注意力设计:
-        Q = states (状态序列，到达状态 s_1..s_N)
+        Q = 状态对 concat[s_i, s_{i+1}]（增量信息载体：贡献 Δd = d(s_i) − d(s_{i+1})）
         K = action_dist (动作分布: mean + log_std)
         V = actions (实际采取的动作 a_0..a_{N-1})
 
     对齐约定（输入 N 个有效 transition，无 dummy）:
         position i (0-based) 对应 transition i:
-            Q = s_{i+1}（执行 a_i 后的到达状态）
+            Q = concat[s_i, s_{i+1}]（执行 a_i 前后的状态对）
             K = dist_i（动作 a_i 的分布）
             V = a_i（实际动作）
         输出权重 w_i 分配给 transition i
 
     特点:
-        - K 和 V 使用简单的 MLP 编码（不需要自注意力）
-        - Q 使用完整的 Transformer 块 + 交叉注意力
-        - 交叉注意力添加因果掩蔽（position i 只能看到动作 0..i，看不到未来）
-        - 状态自注意力无掩码（事后分配允许看全局状态）
-        - 输出 N 个权重，与 transition 数严格一致，无丢弃
+        - Q/K/V 三路均注入位置编码（保持时间语义一致）
+        - 状态自注意力与交叉注意力均无因果掩码（事后分配允许看全局）
+        - 输出两层 MLP → softmax，Σw = 1
     """
 
     def __init__(
@@ -287,9 +282,10 @@ class RewardAllocator(nn.Module):
         self.d_model = d_model
         self.entropy_coef = entropy_coef
 
-        # Q 编码器: 状态编码 + 位置编码
+        # Q 编码器: 状态对 (concat[s_i, s_{i+1}]) 编码 + 位置编码
+        # 输入维度 = 2 * obs_dim（相邻两状态拼接，携带增量信息）
         self.state_encoder = nn.Sequential(
-            nn.Linear(obs_dim, d_model),
+            nn.Linear(obs_dim * 2, d_model),
             nn.ReLU(),
             nn.Linear(d_model, d_model),
         )
@@ -312,20 +308,24 @@ class RewardAllocator(nn.Module):
             nn.Linear(d_model, d_model),
         )
 
-        # Q 处理: Transformer 层 (用于状态序列)
+        # Q 处理: Transformer 层 (用于状态对序列，无掩码：事后分配允许看全局)
         self.state_layers = nn.ModuleList([
             TransformerLayer(d_model, num_heads, d_ff, dropout, use_causal_mask=False)
             for _ in range(num_layers)
         ])
 
-        # 交叉注意力层 (Q attends to K, V)
+        # 交叉注意力层 (Q attends to K, V，无因果掩码：事后分配)
         self.cross_layers = nn.ModuleList([
-            CrossAttentionLayer(d_model, num_heads, d_ff, dropout, use_causal_mask=True)
+            CrossAttentionLayer(d_model, num_heads, d_ff, dropout, use_causal_mask=False)
             for _ in range(num_layers)
         ])
 
-        # 输出层
-        self.output_proj = nn.Linear(d_model, 1)
+        # 输出层：两层 MLP（增强权重预测表达力）
+        self.output_proj = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, 1),
+        )
 
     def forward(
         self,
@@ -337,9 +337,9 @@ class RewardAllocator(nn.Module):
         前向传播
 
         输入（N 个有效 transition，无 dummy，长度必须一致）:
-            states:       [N, obs_dim]       到达状态 s_1..s_N
-            actions:      [N, action_dim]    实际动作 a_0..a_{N-1}
-            actions_dist: [N, action_dim*2]  动作分布 (mean, log_std)
+            states:       [N, 2*obs_dim]    状态对 concat[s_i, s_{i+1}]
+            actions:      [N, action_dim]   实际动作 a_0..a_{N-1}
+            actions_dist: [N, action_dim*2] 动作分布 (mean, log_std)
 
         输出:
             weights: [N] 每个 transition 的权重，Σ=1
@@ -354,7 +354,7 @@ class RewardAllocator(nn.Module):
         else:
             squeeze_output = False
 
-        weights, entropy = self._forward_no_squeeze(states, actions, actions_dist)
+        _, weights, entropy = self._forward_no_squeeze(states, actions, actions_dist)
 
         # 如果输入是单序列，压缩输出
         if squeeze_output:
@@ -362,6 +362,34 @@ class RewardAllocator(nn.Module):
             entropy = entropy.squeeze(0)
 
         return weights, entropy
+
+    def forward_logits(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        actions_dist: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """前向传播（返回 logits，供模仿训练直接回归 log(target)）。
+
+        输入同 forward；输出: (logits, weights, entropy)。
+        logits 是 softmax 之前的原始分数（去均值后形状与 log(target) 对应）。
+        """
+        if states.dim() == 2:
+            states = states.unsqueeze(0)
+            actions = actions.unsqueeze(0)
+            actions_dist = actions_dist.unsqueeze(0)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+
+        logits, weights, entropy = self._forward_no_squeeze(states, actions, actions_dist)
+
+        if squeeze_output:
+            logits = logits.squeeze(0)
+            weights = weights.squeeze(0)
+            entropy = entropy.squeeze(0)
+
+        return logits, weights, entropy
 
     def compute_td_loss(
         self,
@@ -408,10 +436,10 @@ class RewardAllocator(nn.Module):
         states: torch.Tensor,
         actions: torch.Tensor,
         actions_dist: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size, seq_len, _ = states.shape
 
-        # Q = 状态（到达状态 s_1..s_N）
+        # Q = 状态对（concat[s_i, s_{i+1}]，携带增量信息）
         q_emb = self.state_encoder(states)
         q_emb = self.pos_encoder(q_emb)
 
@@ -419,16 +447,16 @@ class RewardAllocator(nn.Module):
         v_emb = self.action_encoder(actions)
         v_emb = self.pos_encoder(v_emb)
 
-        # K = 动作分布（dist_0..dist_{N-1}）
+        # K = 动作分布（dist_0..dist_{N-1}），与 Q/V 一致注入位置编码
         k_emb = self.dist_encoder(actions_dist)
+        k_emb = self.pos_encoder(k_emb)
 
-        # Q 处理（状态自注意力，无掩码：事后分配允许看全局状态）
+        # Q 处理（状态对自注意力，无掩码：事后分配允许看全局状态）
         q_hidden = q_emb
         for layer in self.state_layers:
             q_hidden = layer(q_hidden)
 
-        # 交叉注意力 (Q attends to K, V)
-        # position i 只能看到动作 a_0..a_i（因果掩码，不能看未来动作）
+        # 交叉注意力 (Q attends to K, V)，无因果掩码（事后分配允许看全局动作）
         fused = q_hidden
         for layer in self.cross_layers:
             fused = layer(fused, k_emb, v_emb)
@@ -439,7 +467,7 @@ class RewardAllocator(nn.Module):
 
         entropy = -(weights * torch.log(weights + 1e-8)).sum(dim=-1)
 
-        return weights, entropy#权重，熵
+        return logits, weights, entropy#logits、权重、熵
 
 
 # --- RewardAllocatorAgent ---
@@ -458,7 +486,6 @@ class RewardAllocatorConfig:
     learning_rate: float
     max_seq_len: int
 
-#1
 class RewardAllocatorAgent:
     """
     奖励分配器封装类
@@ -502,9 +529,9 @@ class RewardAllocatorAgent:
         分配奖励
 
         输入（N 个有效 transition，无 dummy，长度必须一致）:
-            states:       [N, obs_dim]       到达状态 s_1..s_N
-            actions:      [N, action_dim]    实际动作 a_0..a_{N-1}
-            actions_dist: [N, action_dim*2]  动作分布 (mean, log_std)
+            states:       [N, 2*obs_dim]    状态对 concat[s_i, s_{i+1}]
+            actions:      [N, action_dim]   实际动作 a_0..a_{N-1}
+            actions_dist: [N, action_dim*2] 动作分布 (mean, log_std)
 
         输出:
             weights: [N] 每个 transition 的权重，保留计算图供训练
@@ -519,22 +546,58 @@ class RewardAllocatorAgent:
 
         return weights, entropy
 
+    def allocate_logits(
+        self,
+        states: np.ndarray,
+        actions: np.ndarray,
+        actions_dist: np.ndarray,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        分配奖励（返回 logits，供模仿训练直接回归 log(target)）。
+
+        输入同 allocate；输出: (logits, weights, entropy)，均保留计算图。
+        """
+        with torch.no_grad():
+            states_t = torch.FloatTensor(states).to(self.device)
+            actions_t = torch.FloatTensor(actions).to(self.device)
+            actions_dist_t = torch.FloatTensor(actions_dist).to(self.device)
+
+        logits, weights, entropy = self.network.forward_logits(states_t, actions_t, actions_dist_t)
+
+        return logits, weights, entropy
+
     # 模仿训练
     def imitation_train_step(
         self,
         target_weights: torch.Tensor,
-        weights:torch.Tensor,
+        logits: torch.Tensor,
     ) -> dict:
-        """
-        训练一步
-        """
+        """模仿训练：让 logits 逼近 log(target_weights)（去均值后回归）。
 
+        对比 softmax 交叉熵（KL）：交叉熵梯度 = (w − t)，在 80 维归一化分布下
+        被 softmax 耦合 + batchmean(/80) 稀释到 ~1e-4，方向噪声大、学不动；
+        logits 回归的梯度 = (logits − log(target))，直接由 target 给定方向，
+        无 softmax 耦合、尺度大（log 域 ~1），训练快且稳定。
+
+        主损失：去均值后的 logits 与 log(target) 的 MSE（只约束形状，不约束 softmax 常数自由度）。
+        辅助损失：0.1 × softmax KL（数值尺度校准）。
+        """
         self.network.train()
 
         self.optimizer.zero_grad()
-        kl_loss = F.kl_div(torch.log(weights+1e-8), target_weights, reduction='batchmean', log_target=False)  # 形状差异
-        mse_loss = F.mse_loss(weights, target_weights)    # 数值差异
-        total_loss = kl_loss + 1.0 * mse_loss
+
+        # 去均值：softmax 对 logits 整体平移不变，只约束形状
+        logits_c = logits - logits.mean(dim=-1, keepdim=True)
+        log_target = torch.log(target_weights + 1e-8)
+        log_target_c = log_target - log_target.mean(dim=-1, keepdim=True)
+
+        mse_loss = F.mse_loss(logits_c, log_target_c)  # 主损失：形状对齐
+
+        # 辅助：softmax 交叉熵（数值尺度校准，权重 0.1）
+        weights = F.softmax(logits, dim=-1)
+        kl_loss = F.kl_div(torch.log(weights + 1e-8), target_weights, reduction='batchmean')
+        total_loss = mse_loss + 0.1 * kl_loss
+
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=0.5)
         self.optimizer.step()
