@@ -99,14 +99,12 @@ class TrainingConfig:
     '''
     tau: float = 0.01#目标网络更新参数
 
-    # 奖励分配网络
-    alloc_d_model: int = 256#奖励分配网络隐藏层维度
-    alloc_num_heads: int = 8#奖励分配网络头数
-    alloc_num_layers: int = 4#奖励分配网络层数
-    alloc_d_ff: int = 512#奖励分配网络前馈网络隐藏层维度，如果分配网络学得慢，可以调大
-    alloc_dropout: float = 0.15#奖励分配网络dropout率
-    alloc_entropy_coef: float = 0.05#奖励分配网络熵正则化系数
-    alloc_lr: float = 1e-4#奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
+    # 奖励分配网络初始化
+    alloc_d_model: int = 64#奖励分配网络隐藏层维度
+    alloc_num_heads: int = 4#奖励分配网络头数
+    alloc_num_layers: int = 2#奖励分配网络层数
+    alloc_d_ff: int = 128#奖励分配网络前馈网络隐藏层维度，如果分配网络学得慢，可以调大
+    alloc_dropout: float = 0.2#奖励分配网络dropout率
     max_seq_len: int = 100#奖励分配网络最大序列长度
 
     # 模仿训练
@@ -115,9 +113,13 @@ class TrainingConfig:
     # 0.5 时 target 为"保持>推进>后退"（约 148:20:2.7），可学且梯度足够强（比 1.0 强约 10 倍）；
     # 1.0 时 target 太平坦（7.4:2.8:1），梯度被 80 维归一化稀释到 1e-5 量级，500 集也推不动。
     imitation_lr: float = 1e-3#模仿训练学习率
-    imitation_batch_episodes: int = 30#模仿训练每批回合数（batch 维=回合，一次梯度更新）
-    imitation_epochs: int = 20#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
-    imitation_dataset_size: int = 500#离线训练数据集大小（每 100 次训练时用当前 PPO 现采 N 回合组成固定数据集）
+    imitation_batch_episodes: int = 16#模仿训练每批回合数（batch 维=回合，一次梯度更新）
+    imitation_epochs: int = 5#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
+    imitation_dataset_size: int = 1000#离线训练数据集大小（每 100 次训练时用当前 PPO 现采 N 回合组成固定数据集）
+
+    #奖励分配网络正常训练
+    alloc_entropy_coef: float = 0.05  # 奖励分配网络熵正则化系数
+    alloc_lr: float = 1e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
@@ -631,7 +633,9 @@ class PPOTrainerWithAllocator:
         # ---------- 2~4. 多 epoch mini-batch 训练 ----------
         total_kl, total_mse, total_steps = 0.0, 0.0, 0
         for epoch in range(self.config.imitation_epochs):
+
             order = np.random.permutation(n_eps)  # 每 epoch 重新打乱
+
             for start in range(0, n_eps, batch):
                 idx = order[start:start + batch]
                 s = torch.FloatTensor(S[idx]).to(device)      # [B, 80, 2*obs]
@@ -646,8 +650,8 @@ class PPOTrainerWithAllocator:
                 log_t = torch.log(t + 1e-8)
                 log_t_c = log_t - log_t.mean(dim=-1, keepdim=True)
                 mse_loss = F.mse_loss(logits_c, log_t_c)  # 主损失
-                mse_loss = ((logits_c - log_t_c) ** 2).mean(dim=-1).mean()
-                kl_loss = F.kl_div(torch.log(w + 1e-8), t, reduction='batchmean')  # 辅助，[B,80]→/B
+                w_clamped = torch.clamp(w, min=1e-8, max=1.0)
+                kl_loss = F.kl_div(torch.log(w_clamped), t, reduction='batchmean')  # 辅助，[B,80]→/B
                 loss = mse_loss + 0.1 * kl_loss
 
                 self.allocator_agent.optimizer.zero_grad()
@@ -687,10 +691,11 @@ class PPOTrainerWithAllocator:
         if self.dense_reward:
             '''level 0 使用密集奖励模式，ppo用密集奖励信号训练，分配网络用密集奖励做模仿训练'''
 
-            # 离线训练分配网络（模仿训练）：每 100 次训练时，
+            # 离线训练分配网络（模仿训练）：每 50 次训练时，
             #    先用当前 PPO 采集 imitation_dataset_size(500) 回合组成固定数据集，
             #    再打乱分批(20/批) 多 epoch(50) 训练，训练完清空
-            if self.episode_count % 50 == 0:
+            if self.episode_count % 50 == 0 and self.episode_count != 0:
+
                 self.raw_buffer_list = self.collect_allocator_dataset(self.config.imitation_dataset_size)
                 alloc_metrics = self.train_allocator_step_imitation(self.raw_buffer_list)
                 # alloc_metrics = {"alloc_kl_loss" "alloc_mse_loss","alloc_kl_total_loss"}
