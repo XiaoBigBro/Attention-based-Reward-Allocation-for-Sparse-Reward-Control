@@ -32,9 +32,9 @@ class EnvCurriculumParams:
 
 CURRICULUM_PRESETS = {
     0: EnvCurriculumParams(target_range=0.28, success_threshold=0.08, max_episode_steps=80,dense_reward=True),
-    1: EnvCurriculumParams(target_range=0.28, success_threshold=0.08, max_episode_steps=80,dense_reward=False),
-    2: EnvCurriculumParams(target_range=0.30, success_threshold=0.05, max_episode_steps=80,dense_reward=False),
-    3: EnvCurriculumParams(target_range=0.34, success_threshold=0.03, max_episode_steps=80,dense_reward=False),
+    1: EnvCurriculumParams(target_range=0.30, success_threshold=0.07, max_episode_steps=80,dense_reward=False),
+    2: EnvCurriculumParams(target_range=0.32, success_threshold=0.06, max_episode_steps=80,dense_reward=False),
+    3: EnvCurriculumParams(target_range=0.34, success_threshold=0.05, max_episode_steps=80,dense_reward=False),
 }
 
 

@@ -123,10 +123,10 @@ class TrainingConfig:
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
-    curriculum_promote_threshold: float = 500.0#课程学习提升阈值
+    curriculum_promote_threshold: float = 170.0#课程学习提升阈值
     curriculum_demote_threshold: float = 10.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 1000#课程学习提升冷却期
-    curriculum_demote_cooldown: int = 200#课程学习降级冷却期
+    curriculum_promote_cooldown: int = 2000#课程学习提升冷却期
+    curriculum_demote_cooldown: int = 500#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
     # 训练流程
@@ -688,7 +688,7 @@ class PPOTrainerWithAllocator:
 
     def train_one_episode(self) -> TrainingMetrics:
         """训练一个回合"""
-        if self.dense_reward:
+        if self.curriculum_level == 0:
             '''level 0 使用密集奖励模式，ppo用密集奖励信号训练，分配网络用密集奖励做模仿训练'''
 
             # 离线训练分配网络（模仿训练）：每 50 次训练时，
@@ -698,7 +698,7 @@ class PPOTrainerWithAllocator:
 
                 self.raw_buffer_list = self.collect_allocator_dataset(self.config.imitation_dataset_size)
                 alloc_metrics = self.train_allocator_step_imitation(self.raw_buffer_list)
-                # alloc_metrics = {"alloc_kl_loss" "alloc_mse_loss","alloc_kl_total_loss"}
+                # alloc_metrics = {"alloc_kl_loss" "alloc_mse_loss","alloc_kl_total_loss"，"alloc_w_rew_corr"}
                 self.raw_buffer_list = []
             else:
                 # 未到离线训练时，alloc_metrics 用默认值（metrics 构造需要）
@@ -724,38 +724,67 @@ class PPOTrainerWithAllocator:
                 '''
                 # 3. 计算 GAE 并构建训练缓冲区
                 train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards, [],None)
-
                 train_buffers_list.append(train_buffer)
 
             train_buffers = self.train_merge_buffers(train_buffers_list)
             # 4. 训练 PPO,用密集奖励信号训练
             ppo_metrics = self.train_ppo_step(train_buffers)
 
-        else:
+        elif self.curriculum_level == 1:
 
-            # 1. 采集轨迹
-            raw_buffer = self.collect_trajectory()  # 里面都是List[Dict]
-            # 采集到了observation（N+1，最后一个位置为最终状态,第一个位置为初始状态）,
-            # action（N+1,第一个位置为0）,step_reward（N,密集奖励）,
-            # mean（N+1,第一个位置为0）,log_stds（N+1,第一个位置为0）,
-            # terminal_reward（标量），log_prob (N个)，value (N个)，
+            #ppo的训练
+            train_buffers_list = []  # 存放多个 TrainingBuffer
+            for _ in range(self.config.ppo_update_interval):
 
-            '''level 1.2.3 使用稀疏奖励模式'''
-            # 2. 奖励分配
-            allocated_rewards1, weights, entropy = self.allocate_rewards(raw_buffer)#长度为N,level1分配网络训练用
-            allocated_rewards2 = np.array(raw_buffer.step_rewards)#长度为N，level1 ppo训练用
+                # 1. 采集轨迹
+                raw_buffer = self.collect_trajectory()  # 里面都是List[Dict]
+                # 采集到了observation（N+1，最后一个位置为最终状态,第一个位置为初始状态）,
+                # action（N+1,第一个位置为0）,step_reward（N,密集奖励）,
+                # mean（N+1,第一个位置为0）,log_stds（N+1,第一个位置为0）,
+                # terminal_reward（标量），log_prob (N个)，value (N个)，
 
-            # 3. 计算 GAE 并构建训练缓冲区
-            '''
-            state(N)、action(N)、reward(N)分配网络给的密集奖励、advantage(N)、return(N)、old_log_prob(N)、
-            next_state(N)、weights=分配网络给的奖励权重、terminal_reward(标量)
-            '''
-            train_buffer1 = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards1, weights, entropy)
-            '''
-            state(N)、action(N)、reward(N)真实的密集奖励信号、advantage(N)、return(N)、old_log_prob(N)、
-            next_state(N)、weights=[]、terminal_reward(标量)
-            '''
-            train_buffer2 = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards2, [],None)
+                # 2. 奖励分配
+                allocated_rewards = np.array(raw_buffer.step_rewards)  # 转为 numpy array
+
+                # 3. 计算 GAE 并构建训练缓冲区
+                train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards, [], None)
+                train_buffers_list.append(train_buffer)
+
+            train_buffers = self.train_merge_buffers(train_buffers_list)
+            # 4. 训练 PPO,用密集奖励信号训练
+            ppo_metrics = self.train_ppo_step(train_buffers)
+
+
+
+        elif self.curriculum_level == 2:
+
+            # ppo的训练
+            train_buffers_list = []  # 存放多个 TrainingBuffer
+            for _ in range(self.config.ppo_update_interval):
+
+                # 1. 采集轨迹
+                raw_buffer = self.collect_trajectory()  # 里面都是List[Dict]
+                # 采集到了observation（N+1，最后一个位置为最终状态,第一个位置为初始状态）,
+                # action（N+1,第一个位置为0）,step_reward（N,密集奖励）,
+                # mean（N+1,第一个位置为0）,log_stds（N+1,第一个位置为0）,
+                # terminal_reward（标量），log_prob (N个)，value (N个)，
+
+                '''level 1.2.3 使用稀疏奖励模式'''
+                # 2. 奖励分配
+                allocated_rewards1, weights, entropy = self.allocate_rewards(raw_buffer)#长度为N,level1分配网络训练用
+                allocated_rewards2 = np.array(raw_buffer.step_rewards)#长度为N，level1 ppo训练用
+
+                # 3. 计算 GAE 并构建训练缓冲区
+                '''
+                state(N)、action(N)、reward(N)分配网络给的密集奖励、advantage(N)、return(N)、old_log_prob(N)、
+                next_state(N)、weights=分配网络给的奖励权重、terminal_reward(标量)
+                '''
+                train_buffer1 = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards1, weights, entropy)
+                '''
+                state(N)、action(N)、reward(N)真实的密集奖励信号、advantage(N)、return(N)、old_log_prob(N)、
+                next_state(N)、weights=[]、terminal_reward(标量)
+                '''
+                train_buffer2 = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards2, [],None)
 
             # 4. PPO 只在 level 2+ 用分配网络给的奖励权重训练，level 1 用ppo的数据训练分配网络，但是ppo任然用密集奖励信号训练
             if self.curriculum_level == 1:
@@ -769,6 +798,15 @@ class PPOTrainerWithAllocator:
             # 5. 训练分配网络
             alloc_metrics = self.train_allocator_step(train_buffer1, self.network)
             #alloc_metrics = {"alloc_td_loss" "alloc_entropy_loss" "alloc_kl_total_loss"}
+
+        elif self.curriculum_level == 3:
+
+            # ppo的训练
+            train_buffers_list = []  # 存放多个 TrainingBuffer
+
+
+
+
 
         # 更新课程学习
         terminal_reward = raw_buffer.terminal_reward
@@ -825,8 +863,6 @@ class PPOTrainerWithAllocator:
         log_std_mean = self.network.actor.log_std.mean().item()
         metrics.log_std = log_std_mean
 
-        self.episode_count += 1
-
         # 每次回合结束都追加写入文件（课程切换时实时保存）
         with open(self.rewards_file, 'a') as f:
             f.write(f"{self.episode_count},{terminal_reward},{self.curriculum_level},"
@@ -861,15 +897,8 @@ class PPOTrainerWithAllocator:
             terminal_rewards.append(metrics.terminal_reward)
             curriculum_levels.append(metrics.curriculum_level)
 
-            # 更新进度条
-            pbar.update(1)
-            pbar.set_postfix({
-                "Level": metrics.curriculum_level,
-                "TR": f"{metrics.terminal_reward:.1f}",
-            })
-
             # 日志
-            if self.episode_count % self.config.log_interval == 1:
+            if self.episode_count % self.config.log_interval == 0:
                 avg_reward = np.mean(terminal_rewards[-self.config.log_interval:])
                 current_level = self.curriculum_manager.get_current_level()
                 window_mean = self.curriculum_manager.reward_window.mean() if self.curriculum_manager.reward_window.count() > 0 else 0.0
@@ -892,6 +921,15 @@ class PPOTrainerWithAllocator:
                 pbar.write(f"  分配网络mes损失: {metrics.alloc_mse_loss:.4f}")
                 pbar.write(f"  分配网络模仿训练总损失: {metrics.alloc_kl_total_loss:.4f}")
                 pbar.write(f"  分配网络权重-奖励相关: {metrics.alloc_w_rew_corr:.3f}")
+
+            self.episode_count += 1
+
+            # 更新进度条
+            pbar.update(1)
+            pbar.set_postfix({
+                "Level": metrics.curriculum_level,
+                "TR": f"{metrics.terminal_reward:.1f}",
+            })
 
             # 课程升级时保存
             if metrics.curriculum_changed == "promote":
