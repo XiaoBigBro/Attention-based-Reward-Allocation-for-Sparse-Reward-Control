@@ -172,7 +172,6 @@ class RawTrajectoryBuffer:
         """返回 concat(mean, log_std)，形状 [N+1, action_dim * 2]（shifted）"""
         return np.concatenate([self.means, self.log_stds], axis=-1)
 
-    @property
 
 
     def __len__(self) -> int:
