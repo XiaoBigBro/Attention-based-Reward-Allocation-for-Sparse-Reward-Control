@@ -81,9 +81,11 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
     将 FetchReach/Push 改造为可切换的稠密/稀疏奖励环境。
 
     行为：
-    - Level 0 (dense_reward=True): 每步返回基于距离的即时奖励
-    - Level 1+ (dense_reward=False): 中间步 reward=0，回合末返回累积奖励
-    - 回合固定跑满 T 步（不因提前到达目标而提前终止）
+    - step() 返回 (obs, terminated, truncated, info) 四元组（不含 reward）；
+      每步即时奖励写入 info["step_rewards"]，回合末写入 info["terminal_reward"]。
+    - dense_reward 仅标识档位（Level 0 密集档 / Level 1+ 稀疏档），
+      奖励计算与档位无关，各档都按 CURRICULUM_PRESETS 的 success_threshold 计算增量奖励。
+    - 回合固定跑满 max_episode_steps 步（不因提前到达目标而提前终止）。
     """
 
     def __init__(
@@ -108,18 +110,10 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
     # 课程接口（Step 2 直接调用）
     # ------------------------------------------------------------------
 
-    @property
-    def curriculum_level(self) -> int:
-        """返回当前难度等级。"""
-        return self._curriculum_level
 
-    @property
-    def use_dense_reward(self) -> bool:
-        """返回是否使用稠密奖励模式。"""
-        return self._dense_reward
 
     def set_curriculum_level(self, level: int, ) -> None:
-        """切换到指定难度等级（0=易, 1=中, 2=难,3=最难）。"""
+        """切换到指定难度等级（0..5；0 为密集档，1..5 为稀疏档）。"""
         if level not in CURRICULUM_PRESETS:
             raise ValueError(f"level must be 0..{NUM_CURRICULUM_LEVELS - 1}, got {level}")
         self._curriculum_level = level
@@ -127,8 +121,6 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         self._dense_reward = self._params.dense_reward  # Level 0 用稠密，Level 1+ 用稀疏
         self._sync_target_range()
 
-    def get_curriculum_params(self) -> EnvCurriculumParams:
-        return self._params#返回当前难度等级对应的参数
 
     # ------------------------------------------------------------------
     # 内部

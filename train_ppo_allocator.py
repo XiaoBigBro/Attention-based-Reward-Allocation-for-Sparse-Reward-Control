@@ -80,12 +80,11 @@ class TrainingConfig:
     #越小训练时间越短，但样本利用率越低
     '''
     ppo_epochs: int = 4
-    ppo_update_interval: int = 5 #收集多少回合再进行训练
-    '''
-    如果发现 Critic Loss 一直很高，说明价值网络学得不够快，
-    可以把 critic_updates_per_epoch 调到 6-8。
-    '''
-    critic_updates_per_epoch: int = 2#价值网络更新次数
+    ppo_update_interval: int = 5 #收集多少回合再进行训练（Level 0 / 兜底分支用：每回合采 5 集后全 batch 更新一次）
+    # 价值网络每 epoch 更新次数（仅全 batch 更新模式使用；mini-batch 模式每小批 1 次）。
+    # 注意：每 epoch 更新次数过高会让 critic 在少量样本上过拟合、估值摆动，
+    # 已从 6 降到 2 以稳定训练（配合多 episode 累积更新）。
+    critic_updates_per_epoch: int = 2
 
     max_grad_norm: float = 0.5#最大梯度范数，防止梯度爆炸
 
@@ -128,6 +127,16 @@ class TrainingConfig:
     curriculum_promote_cooldown: int = 2000#课程学习提升冷却期
     curriculum_demote_cooldown: int = 500#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
+
+    # Level 1（PPO 混合奖励过渡训练）
+    # 每 1 个 episode_count = 采 level1_collect_episodes 集构成一个块 → 打乱 mini-batch 训一次；
+    # α 按 level1 内真实集数（已完成块数 × level1_collect_episodes）/ curriculum_promote_cooldown 推进，超过 cooldown 恒为 1
+    level1_collect_episodes: int = 200#Level 1 每个 episode_count 采集的回合数（一个块）
+    level1_mini_batch_size: int = 512#Level 1 PPO mini-batch 大小（时间步）
+    # Level 1 分配网络训练（块末批量训练；老师随 α 从 dense 平滑切换到 critic 的 TD 自举）
+    level1_alloc_epochs: int = 3           # 每块分配网络训练 epoch 数（200 集 / 16 批 ≈ 13 批/epoch）
+    level1_alloc_batch_episodes: int = 16  # 每批回合数（batch 维 = 回合）
+    level1_alloc_max_beta: float = 0.9     # β 上限（α=1 时仍留 0.1 模仿锚，防纯 TD 自举崩）
 
     # 训练流程
     total_episodes: int = 10000
@@ -242,7 +251,6 @@ class PPOTrainerWithAllocator:
             max_seq_len=config.max_seq_len,
         )
         self.allocator_agent = RewardAllocatorAgent(alloc_config, str(self.device))
-        self.raw_buffer_list = []  # 存放分配网络的训练数据
 
         print("[3/5] 初始化环境...")
         self.env = make_fetch_env(
@@ -263,10 +271,25 @@ class PPOTrainerWithAllocator:
         )
         
         print("[5/5] 准备完成!")
-        # 全局训练计数器
+
+        # ===================== 各课程等级训练状态（统一归类） =====================
+        # 全局训练计数器（train() 主循环每回合 +1）
         self.episode_count = 0#回合数计数器
-        # 分配网络模仿训练：累积的原始轨迹（Level 0 每集 append，每 100 次批量训练一次后清空）
+
+        # --- Level 0 训练状态（密集奖励 PPO + 分配网络离线模仿训练） ---
+        # 分配网络模仿训练数据集累积（原始轨迹快照列表）：
+        #   Level 0 分支每 episode_count 检查一次，到离线训练时机（episode_count % 50 == 0）
+        #   就现场采集 imitation_dataset_size 集组成固定数据集训练分配网络，训练完清空。
         self.raw_buffer_list: List[RawTrajectoryBuffer] = []
+
+        # --- Level 1 训练状态（混合奖励过渡 PPO + mini-batch 块式训练） ---
+        # _l1_alpha: 当前块的 α。块首（采集前）按 level1 内真实集数算一次、整块固定；
+        #             α = min(1, level1 内真实集数 / curriculum_promote_cooldown)。
+        self._l1_alpha: float = 0.0
+        # _l1_alloc_block: 当前块采集的原始轨迹累积（供块末分配网络批量训练）。
+        #   每集采集后 append，块末分配网络训练完清空。TD 需要完整状态序列与 step_rewards，
+        #   直接存 RawTrajectoryBuffer 引用即可（块内采集期间 PPO 只读这些对象，安全）。
+        self._l1_alloc_block: List[RawTrajectoryBuffer] = []
 
     def _policy_fn(self, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray,float, float]:
         """策略函数，用于采集数据"""
@@ -308,11 +331,6 @@ class PPOTrainerWithAllocator:
 
         return merged
 
-    # def raw_merge_buffers(self, buffers: List[RawTrajectoryBuffer]) -> RawTrajectoryBuffer:
-    #
-    #     merged = RawTrajectoryBuffer()
-    #
-    #     for buf in buffers:
 
     def _build_state_pairs(self, observations: List[np.ndarray]) -> np.ndarray:
         """把 N+1 个观测序列构造成 N 个状态对 concat[s_i, s_{i+1}]（分配网络 Q 输入）"""
@@ -437,8 +455,17 @@ class PPOTrainerWithAllocator:
 
         return train_buffer
 
+    # ============================================================================
+    # PPO 训练（两种模式，互不影响）：
+    #   - train_ppo_step:            全 batch 更新（Level 0 / Level >= 2 兜底用）
+    #   - train_ppo_step_minibatch:  打乱 mini-batch 更新（Level 1 块式训练用）
+    # ============================================================================
+
     def train_ppo_step(self, train_buffer: TrainingBuffer) -> Dict[str, float]:
-        """训练 PPO 网络：策略网络更新 ppo_epochs 次，价值网络更新 critic_updates_per_epoch * ppo_epochs 次"""
+        """训练 PPO 网络（全 batch 更新）：策略网络更新 ppo_epochs 次，
+        价值网络每 epoch 更新 critic_updates_per_epoch 次。
+        供 Level 0 / Level >= 2 兜底使用（每 ppo_update_interval 集的 batch 做一次更新）。
+        Level 1 的 mini-batch 打乱训练见 train_ppo_step_minibatch。"""
 
         # 获取当前的熵系数
         current_entropy_coef = self.get_entropy_coef()
@@ -523,49 +550,109 @@ class PPOTrainerWithAllocator:
             "entropy_loss": total_entropy_loss / n,
         }
 
-    def train_allocator_step(
-        self,
-        train_buffer: TrainingBuffer,
-        critic_network,
-    ) -> Dict[str, float]:
-        """训练奖励分配网络"""
+    def train_ppo_step_minibatch(self, train_buffer: TrainingBuffer,
+                                 mini_batch_size: int) -> Dict[str, float]:
+        """训练 PPO 网络（mini-batch 打乱更新）：仅供 Level 1 块式训练使用。
 
-        # 构造 N+1 个 states: [s_0, ..., s_{N-1}] + [s_N]
-        states_list = list(train_buffer.states) + [train_buffer.next_states[-1]]
-        states_padded = np.array(states_list, dtype=np.float32)
+        与 train_ppo_step（全 batch）的区别：
+          - 把整块 transitions 随机打乱（每 epoch 重新打乱一次），
+            按 mini_batch_size 分成多个小批；
+          - 每小批做 1 次 actor 更新 + 1 次 critic 更新；
+          - 一个块的总更新次数 ≈ ceil(N / mini_batch_size) × ppo_epochs。
 
-        # 获取价值估计（长度为 N+1）
-        obs_t = torch.FloatTensor(states_padded).to(self.device)
-        # online value 需要梯度，但 target value 不需要
-        v_all = critic_network.get_value(obs_t).squeeze(-1)  # [N+1]: V(s_0)...V(s_N)
+        价值裁剪参考值：本次 update 开始时用当前 critic 对全 batch 算一次、
+        整个 update 全程固定（标准 PPO 做法，与全 batch 版 epoch==0 算一次等价）。
+
+        参数:
+          train_buffer:  一块（level1_collect_episodes 集）merge 后的 TrainingBuffer
+          mini_batch_size: 每小批的时间步数（如 512）
+
+        返回: policy_loss / value_loss / entropy_loss（按实际梯度更新次数平均，
+        与 train_ppo_step 返回口径一致）
+        """
+
+        # 获取当前的熵系数
+        current_entropy_coef = self.get_entropy_coef()
+
+        # 转为 tensor
+        states = torch.FloatTensor(np.array(train_buffer.states)).to(self.device)
+        actions = torch.FloatTensor(np.array(train_buffer.actions)).to(self.device)
+        old_log_probs = torch.FloatTensor(train_buffer.old_log_probs).to(self.device)
+        advantages = torch.FloatTensor(train_buffer.advantages).to(self.device)
+        returns = torch.FloatTensor(train_buffer.returns).to(self.device)
+
+        # 标准化优势
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        n = states.size(0)
+
+        # 价值裁剪参考值：本次 update 开始前用当前 critic 对全部状态算一次，整个 update 固定
         with torch.no_grad():
-            v_target_all = critic_network.get_target_value(obs_t).squeeze(-1)  # [N+1]
+            old_values = self.network.get_value(states).squeeze(-1).detach()
 
-        # allocator 前向输出 weights 为 N（position 1...N 对应 transition 0...N-1）
-        # TD target 使用对应位置的 value: V(s_1)...V(s_N)
-        # 保持为 tensor 以支持梯度计算
-        v_online = v_all[:-1].detach()  # [N], 断开 Critic 计算图
-        v_target_next = v_target_all[1:]  # [N]，最后一步 V(s_N) 用于 bootstrap
+        # 累计损失（按实际梯度更新次数平均）
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        total_entropy_loss = 0.0
+        n_actor_updates = 0
+        n_critic_updates = 0
 
-        # # gamma 转为 tensor 以便与 tensor 相乘
-        # gamma_tensor = torch.tensor(self.config.gamma, dtype=torch.float32, device=self.device)
+        # 每 epoch 打乱一次，按 mini_batch_size 分批更新
+        for epoch in range(self.config.ppo_epochs):
+            perm = torch.randperm(n, device=self.device)
+            for start in range(0, n, mini_batch_size):
+                idx = perm[start:start + mini_batch_size]
+                s_b, a_b = states[idx], actions[idx]
+                old_lp_b = old_log_probs[idx]
+                adv_b = advantages[idx]
+                ret_b = returns[idx]
 
-        # 训练分配网络
-        metrics = self.allocator_agent.TD_train_step(
-            train_buffer=train_buffer,
-            gamma=self.config.gamma,
-            v_online=v_online,
-            v_target_next=v_target_next,
-        )
+                # --- Actor 更新（每小批 1 次） ---
+                self.optimizer_actor.zero_grad()
+                new_log_probs = self.network.actor.get_log_prob(s_b, a_b)
+                log_std = torch.clamp(self.network.actor.log_std,
+                                      self.config.log_std_min, self.config.log_std_max)
+                entropy = (0.5 * (1.0 + np.log(2.0 * np.pi)) + log_std).sum()
+                ratio = torch.exp(new_log_probs - old_lp_b)
+                ratio = torch.clamp(ratio, 0.01, 5.0)
+                surr1 = ratio * adv_b
+                surr2 = torch.clamp(ratio, 1 - self.config.clip_eps,
+                                    1 + self.config.clip_eps) * adv_b
+                policy_loss = -torch.min(surr1, surr2).mean()
+                entropy_loss = -current_entropy_coef * entropy
+                actor_loss = policy_loss + entropy_loss
+                actor_loss.backward()
+                nn.utils.clip_grad_norm_(self.network.actor.parameters(), self.config.max_grad_norm)
+                self.optimizer_actor.step()
+
+                # --- Critic 更新（每小批 1 次，clip 参考 old_values[idx]） ---
+                self.optimizer_critic.zero_grad()
+                values = self.network.get_value(s_b).squeeze(-1)
+                values_clipped = torch.clamp(values,
+                                             old_values[idx] - self.config.value_clip_eps,
+                                             old_values[idx] + self.config.value_clip_eps)
+                value_loss_unclipped = F.smooth_l1_loss(values, ret_b)
+                value_loss_clipped = F.smooth_l1_loss(values_clipped, ret_b)
+                value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
+                value_loss.backward()
+                nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.config.max_grad_norm)
+                self.optimizer_critic.step()
+
+                total_policy_loss += policy_loss.item()
+                total_entropy_loss += entropy_loss.item()
+                total_value_loss += value_loss.item()
+                n_actor_updates += 1
+                n_critic_updates += 1
+
+        # 软更新 target_critic
+        self.network._soft_update_target(self.config.tau)
 
         return {
-            "alloc_td_loss": metrics.get("td_loss", 0),
-            "alloc_entropy_loss": metrics.get("entropy_loss", 0),
-            "alloc_total_loss": metrics.get("total_loss", 0),
-            "alloc_kl_loss": metrics.get("kl_loss", 0),
-            "alloc_mse_loss": metrics.get("mse_loss", 0),
-            "alloc_kl_total_loss": metrics.get("kl_total_loss", 0),
+            "policy_loss": total_policy_loss / max(n_actor_updates, 1),
+            "value_loss": total_value_loss / max(n_critic_updates, 1),
+            "entropy_loss": total_entropy_loss / max(n_actor_updates, 1),
         }
+
 
     def collect_allocator_dataset(self, num_episodes: int) -> Dict[str, np.ndarray]:
         """用当前 PPO 策略采集 num_episodes 个回合，**采集时就完成预处理**，
@@ -686,14 +773,136 @@ class PPOTrainerWithAllocator:
             "alloc_w_rew_corr": w_rew_corr,
         }
 
-    def train_one_episode(self) -> TrainingMetrics:
-        """训练一个回合"""
-        if self.curriculum_level == 0:
-            '''level 0 使用密集奖励模式，ppo用密集奖励信号训练，分配网络用密集奖励做模仿训练'''
+    def train_allocator_step_level1(self) -> Dict[str, float]:
+        """训练奖励分配网络（Level 1 块末批量训练）：模仿锚 + TD 自举。
 
-            # 离线训练分配网络（模仿训练）：每 50 次训练时，
-            #    先用当前 PPO 采集 imitation_dataset_size(500) 回合组成固定数据集，
-            #    再打乱分批(20/批) 多 epoch(50) 训练，训练完清空
+        背景：Level 1 是"换老师过渡期"——分配网络从 Level 0 的"靠密集奖励当老师"
+        过渡到 Level 2 的"靠价值自举（TD）当老师"。本方法在每块 PPO 训完后调用，
+        用本块采集的原始轨迹（self._l1_alloc_block）批量训练分配网络。
+
+        损失：L_alloc = (1-β)·L_im + β·L_TD，β = min(块首α, level1_alloc_max_beta)
+          - L_im（模仿锚，老师=dense）：target = exp(dense/temperature) 归一化，
+            与 Level 0 完全一致（MSE(logits_c, log(target)_c) + 0.1·KL），保形状不退化。
+          - L_TD（自举，老师=critic）：td_target = R_term·w + γ·V_target(s_{t+1})，
+            对齐 V_online(s_t)。w 用当前 allocator 参数现场前向（不吃采集时的旧 w）；
+            V 用当前 critic（online 断图 / target 慢速）。
+            α 越大（PPO 越吃分配奖励、critic 越接近分配价值）β 越大——老师随 α 平滑切换。
+
+        节奏：本块回合 shuffle → level1_alloc_batch_episodes 回合/批 × level1_alloc_epochs。
+        返回各指标均值（块为空时返回全 0）。
+        """
+        block = self._l1_alloc_block
+        n_eps = len(block)
+
+        device = self.device
+        beta = min(self._l1_alpha, self.config.level1_alloc_max_beta)
+        batch = self.config.level1_alloc_batch_episodes
+        temp = self.config.temperature
+
+        # 预处理整个块 → 定长批张量所需数组
+        # states_pairs [n,T,2*obs] / actions [n,T,act] / dists [n,T,2*act] / targets [n,T] / R [n]
+        # obs_all [n,T+1,obs]（TD 算 critic V 用，含末态 s_T）
+        states_pairs_arr, actions_arr, dists_arr, targets_arr, obs_all_arr, R_arr = [], [], [], [], [], []
+        for rb in block:
+            dense = np.array(rb.step_rewards, dtype=np.float32)                        # [T]
+            imp = np.exp(dense / temp)
+            tgt = imp / imp.sum()                                                     # [T] Σ=1
+            states_pairs_arr.append(self._build_state_pairs(rb.observations))         # [T, 2*obs]
+            actions_arr.append(np.array(rb.actions[1:], dtype=np.float32))            # [T, act]
+            dists_arr.append(np.array(rb.get_action_dist()[1:], dtype=np.float32))    # [T, 2*act]
+            obs_all_arr.append(np.array(rb.observations, dtype=np.float32))           # [T+1, obs]
+            targets_arr.append(tgt)
+            R_arr.append(float(rb.terminal_reward))
+        S = torch.FloatTensor(np.array(states_pairs_arr)).to(device)   # [n,T,2*obs]
+        A = torch.FloatTensor(np.array(actions_arr)).to(device)        # [n,T,act]
+        D = torch.FloatTensor(np.array(dists_arr)).to(device)          # [n,T,2*act]
+        Tt = torch.FloatTensor(np.array(targets_arr)).to(device)       # [n,T]
+        R = torch.FloatTensor(R_arr).to(device)                        # [n]
+        O = torch.FloatTensor(np.array(obs_all_arr)).to(device)        # [n,T+1,obs]
+
+        self.allocator_agent.network.train()
+        total_kl, total_mse, total_td, n_steps = 0.0, 0.0, 0.0, 0
+        for _ in range(self.config.level1_alloc_epochs):
+            order = np.random.permutation(n_eps)  # 每 epoch 重新打乱
+            for start in range(0, n_eps, batch):
+                idx = order[start:start + batch]
+                s, a, d = S[idx], A[idx], D[idx]
+                t, r = Tt[idx], R[idx]
+                o = O[idx]                        # [B, T+1, obs]
+
+                # allocator 当前参数前向（带图）
+                logits, w, _ = self.allocator_agent.network.forward_logits(s, a, d)   # w softmax [B,T]
+
+                # --- L_im：模仿 dense 形状（与 Level 0 相同结构） ---
+                logits_c = logits - logits.mean(dim=-1, keepdim=True)
+                log_t = torch.log(t + 1e-8)
+                log_t_c = log_t - log_t.mean(dim=-1, keepdim=True)
+                mse_loss = F.mse_loss(logits_c, log_t_c)                              # 主损失
+                w_clamped = torch.clamp(w, min=1e-8, max=1.0)
+                kl_loss = F.kl_div(torch.log(w_clamped), t, reduction='batchmean')    # 辅助
+                L_im = mse_loss + 0.1 * kl_loss
+
+                # --- L_TD：价值自举（w 当前参数 + critic 当前价值） ---
+                # online critic 的 V 断图：allocator 只应经 w 得到梯度
+                v_online = self.network.get_value(o).squeeze(-1)[:, :-1].detach()       # [B,T] V(s_0..s_{T-1})
+                with torch.no_grad():
+                    v_target_next = self.network.get_target_value(o).squeeze(-1)[:, 1:] # [B,T] V(s_1..s_T)
+                td_target = r.unsqueeze(-1) * w + self.config.gamma * v_target_next
+                td_loss = ((td_target - v_online) ** 2).mean()
+
+                loss = (1.0 - beta) * L_im + beta * td_loss
+
+                self.allocator_agent.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.allocator_agent.network.parameters(), max_norm=0.5)
+                self.allocator_agent.optimizer.step()
+
+                total_kl += kl_loss.item()
+                total_mse += mse_loss.item()
+                total_td += td_loss.item()
+                n_steps += 1
+
+        # ---------- 诊断 corr：训练后 w 与真实密集奖励的相关性 ----------
+        corrs = []
+        with torch.no_grad():
+            for i in range(n_eps):
+                s, a, d = S[i:i+1], A[i:i+1], D[i:i+1]
+                _, w, _ = self.allocator_agent.network.forward_logits(s, a, d)
+                wn = w.cpu().numpy()[0]
+                dense_i = np.array(block[i].step_rewards, dtype=np.float32)
+                if dense_i.std() > 1e-9:
+                    corrs.append(float(np.corrcoef(dense_i, wn)[0, 1]))
+        w_rew_corr = float(np.mean(corrs)) if corrs else 0.0
+
+        print(f"[Level1 分配网络训练] {n_eps} 回合, {batch}/批 × {self.config.level1_alloc_epochs} epoch "
+              f"= {n_steps} 梯度步, α={self._l1_alpha:.3f} β={beta:.3f}")
+        return {
+            "alloc_kl_loss": total_kl / max(n_steps, 1),
+            "alloc_mse_loss": total_mse / max(n_steps, 1),
+            "alloc_kl_total_loss": (total_kl + total_mse) / max(n_steps, 1),
+            "alloc_td_loss": total_td / max(n_steps, 1),
+            "alloc_entropy_loss": 0.0,
+            "alloc_total_loss": (total_td + total_kl + total_mse) / max(n_steps, 1),
+            "alloc_w_rew_corr": w_rew_corr,
+        }
+
+    def train_one_episode(self) -> TrainingMetrics:
+        """训练一个回合。
+        回合粒度按课程等级区分：
+          - Level 0:          一个回合 = 采 ppo_update_interval(5) 集 → 全 batch 训练 PPO 一次
+          - Level 1:          一个回合 = 采 level1_collect_episodes(200) 集（一块）→ mini-batch 训练 PPO 一次
+          - Level >= 2（兜底）: 一个回合 = 采 ppo_update_interval(5) 集 → 全 batch 训练 PPO 一次
+        课程窗口（promote/demote 依据）统一在回合末对块末那一集 on_episode_end 计入一次。"""
+        if self.curriculum_level == 0:
+            '''level 0：密集奖励模式。PPO 用真实密集奖励信号做全 batch 训练；
+            分配网络每 50 个回合离线采集 imitation_dataset_size 集做模仿训练。
+            ppo每回合采集ppo_update_interval集做训练
+            '''
+
+
+            # 离线训练分配网络（模仿训练）：每 50 回合触发一次，
+            # 先用当前 PPO 现场采集 imitation_dataset_size 集组成固定数据集，
+            # 再打乱分批(16/批) 多 epoch(5) 训练，训练完清空
             if self.episode_count % 50 == 0 and self.episode_count != 0:
 
                 self.raw_buffer_list = self.collect_allocator_dataset(self.config.imitation_dataset_size)
@@ -706,17 +915,18 @@ class PPOTrainerWithAllocator:
                                  "alloc_td_loss": 0.0, "alloc_entropy_loss": 0.0, "alloc_total_loss": 0.0,
                                  "alloc_w_rew_corr": 0.0}
 
-            #ppo的训练
+            # 采集 ppo_update_interval 集（全 batch 更新用）
             train_buffers_list = []  # 存放多个 TrainingBuffer
-            for _ in range(self.config.ppo_update_interval):
+            total = 0.0
+            for i in range(self.config.ppo_update_interval):
                 # 1. 采集轨迹
                 raw_buffer = self.collect_trajectory()  # 里面都是List[Dict]
                 # 采集到了observation（N+1，最后一个位置为最终状态,第一个位置为初始状态）,
                 # action（N+1,第一个位置为0）,step_reward（N,密集奖励）,
                 # mean（N+1,第一个位置为0）,log_stds（N+1,第一个位置为0）,
                 # terminal_reward（标量），log_prob (N个)，value (N个)，
-
-                # 2. 奖励分配
+                total += raw_buffer.terminal_reward
+                # 2. 奖励 = 真实密集奖励
                 allocated_rewards = np.array(raw_buffer.step_rewards)  # 转为 numpy array
                 '''
                 state(N)、action(N)、reward(N)真实的密集奖励信号、advantage(N)、return(N)、old_log_prob(N)、
@@ -727,89 +937,98 @@ class PPOTrainerWithAllocator:
                 train_buffers_list.append(train_buffer)
 
             train_buffers = self.train_merge_buffers(train_buffers_list)
-            # 4. 训练 PPO,用密集奖励信号训练
+            # 4. 全 batch 训练 PPO，用密集奖励信号训练
             ppo_metrics = self.train_ppo_step(train_buffers)
 
         elif self.curriculum_level == 1:
+            '''level 1：每 1 个 episode_count 采 level1_collect_episodes(200) 集构成一块（一次 PPO mini-batch 更新轮），
+            奖励从"纯密集"逐步过渡到"纯分配网络奖励"（Level 2 形态）。
+            每步奖励:  r_ppo(t) = (1-α)·r_dense(t) + α·R_term·w(t)
+                       r_dense(t)=环境真实密集奖励；w(t)=分配网络对当前轨迹事后输出的权重（Σw=1）
+            守恒性质:  Σ r_dense = Σ R_term·w = R_term → Σ r_ppo 恒 = R_term，GAE/critic 尺度不随 α 变。
+            α 调度:    α 在【块首（采集前）】算一次、整块固定；
+                       按 level1 内真实集数（level_episode_counts[level1] × level1_collect_episodes）/ curriculum_promote_cooldown 线性 0→1；
+                       超过 promote_cooldown 后 α 恒为 1 → 整块纯分配网络奖励。
+            训练:      采满一块后 PPO 把块内全部 transitions 打乱，按 level1_mini_batch_size(512) 分批，
+                       扫 ppo_epochs(4) 遍（每批 actor+critic 各一次）——见 train_ppo_step_minibatch。
+            课程:      同 Level 0 语义——每 1 个 episode_count（本分支即一块）结束时对块末那集 on_episode_end 计入一次。
+            说明:      每集 allocator eval 前向拿 w（禁 dropout，用后恢复 train）只用于混合奖励；
+                       allocator 自身训练：块末用本块轨迹批量训练（模仿锚 + TD 自举），见 train_allocator_step_level1。'''
 
-            #ppo的训练
+            # 块首：α 在采集前算好，整块固定（真实集数 = 本 level 已完成块数 × 每块集数）
+            n_real_in_level = (self.curriculum_manager.level_episode_counts[self.curriculum_level]
+                               * self.config.level1_collect_episodes)
+            self._l1_alpha = min(1.0, n_real_in_level / float(self.config.curriculum_promote_cooldown))
+
+            # 1. 采集一整块（level1_collect_episodes 集）
+            train_buffers_list = []  # 存放多个 TrainingBuffer（一块 = level1_collect_episodes 个）
+            total = 0.0
+            self._l1_alloc_block = []  # 本块的分配网络训练样本（原始轨迹），块末训完清空
+            self.allocator_agent.network.eval()
+
+            for i in range(self.config.level1_collect_episodes):
+                # 1.1 采集轨迹
+                raw_buffer = self.collect_trajectory()
+
+                total += raw_buffer.terminal_reward
+
+                dense_rewards = np.array(raw_buffer.step_rewards, dtype=np.float32)  # [N] 真实密集
+
+                # 1.2 分配网络对当前轨迹事后分配：allocated = R_term·w（[N]，Σ=R_term）
+                #     eval 模式（禁 dropout）保证 w 确定性；用后恢复 train 态
+
+                allocated, weights_t, _ = self.allocate_rewards(raw_buffer)
+
+                # 1.3 混合奖励（Σ 恒 = R_term），用块首固定的 α
+                allocated_np = allocated.detach().cpu().numpy()
+                r_mix = (1.0 - self._l1_alpha) * dense_rewards + self._l1_alpha * allocated_np
+
+                # 1.4 计算 GAE 并构建训练缓冲区（weights 存 tensor 图，供后续 allocator TD 训练复用）
+                train_buffer = self.compute_gae_and_train_buffer(raw_buffer, r_mix, weights_t, None)
+                train_buffers_list.append(train_buffer)
+
+                # 1.5 顺手存分配网络训练样本（块末批量训练用；PPO 只读该对象，安全）
+                self._l1_alloc_block.append(raw_buffer)
+
+            self.allocator_agent.network.train()
+            # 2. mini-batch 训练 PPO：整块 transitions 打乱 → 512/批 × ppo_epochs 遍
+            train_buffers = self.train_merge_buffers(train_buffers_list)
+            ppo_metrics = self.train_ppo_step_minibatch(
+                train_buffers,
+                mini_batch_size=self.config.level1_mini_batch_size,
+            )
+
+            # 3. 分配网络训练：先用本块最新 PPO 训练 critic，再训练 allocator
+            #    （模仿锚 + TD 自举，β = min(α, max_beta)，老师随 α 平滑切换）
+            alloc_metrics = self.train_allocator_step_level1()
+
+        else:
+            '''level >= 2（尚未深入设计）：先用纯密集累积训练兜底，
+            保证课程推进到更高 level 时流程不崩；分配奖励语义待后续 Level 2 设计时再改。'''
             train_buffers_list = []  # 存放多个 TrainingBuffer
-            for _ in range(self.config.ppo_update_interval):
-
+            total = 0.0
+            for i in range(self.config.ppo_update_interval):
                 # 1. 采集轨迹
-                raw_buffer = self.collect_trajectory()  # 里面都是List[Dict]
-                # 采集到了observation（N+1，最后一个位置为最终状态,第一个位置为初始状态）,
-                # action（N+1,第一个位置为0）,step_reward（N,密集奖励）,
-                # mean（N+1,第一个位置为0）,log_stds（N+1,第一个位置为0）,
-                # terminal_reward（标量），log_prob (N个)，value (N个)，
+                raw_buffer = self.collect_trajectory()
 
-                # 2. 奖励分配
-                allocated_rewards = np.array(raw_buffer.step_rewards)  # 转为 numpy array
-
+                # 2. 用真实密集奖励训练（env 的 step_rewards 在稀疏档仍会填充）
+                allocated_rewards = np.array(raw_buffer.step_rewards, dtype=np.float32)
+                total += raw_buffer.terminal_reward
                 # 3. 计算 GAE 并构建训练缓冲区
                 train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards, [], None)
                 train_buffers_list.append(train_buffer)
 
             train_buffers = self.train_merge_buffers(train_buffers_list)
-            # 4. 训练 PPO,用密集奖励信号训练
+            # 4. 全 batch 训练 PPO
             ppo_metrics = self.train_ppo_step(train_buffers)
 
-
-
-        elif self.curriculum_level == 2:
-
-            # ppo的训练
-            train_buffers_list = []  # 存放多个 TrainingBuffer
-            for _ in range(self.config.ppo_update_interval):
-
-                # 1. 采集轨迹
-                raw_buffer = self.collect_trajectory()  # 里面都是List[Dict]
-                # 采集到了observation（N+1，最后一个位置为最终状态,第一个位置为初始状态）,
-                # action（N+1,第一个位置为0）,step_reward（N,密集奖励）,
-                # mean（N+1,第一个位置为0）,log_stds（N+1,第一个位置为0）,
-                # terminal_reward（标量），log_prob (N个)，value (N个)，
-
-                '''level 1.2.3 使用稀疏奖励模式'''
-                # 2. 奖励分配
-                allocated_rewards1, weights, entropy = self.allocate_rewards(raw_buffer)#长度为N,level1分配网络训练用
-                allocated_rewards2 = np.array(raw_buffer.step_rewards)#长度为N，level1 ppo训练用
-
-                # 3. 计算 GAE 并构建训练缓冲区
-                '''
-                state(N)、action(N)、reward(N)分配网络给的密集奖励、advantage(N)、return(N)、old_log_prob(N)、
-                next_state(N)、weights=分配网络给的奖励权重、terminal_reward(标量)
-                '''
-                train_buffer1 = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards1, weights, entropy)
-                '''
-                state(N)、action(N)、reward(N)真实的密集奖励信号、advantage(N)、return(N)、old_log_prob(N)、
-                next_state(N)、weights=[]、terminal_reward(标量)
-                '''
-                train_buffer2 = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards2, [],None)
-
-            # 4. PPO 只在 level 2+ 用分配网络给的奖励权重训练，level 1 用ppo的数据训练分配网络，但是ppo任然用密集奖励信号训练
-            if self.curriculum_level == 1:
-                ppo_metrics = self.train_ppo_step(train_buffer2)
-                #ppo_metrics = {"policy_loss" "value_loss" "entropy_loss"}
-
-            else:
-                ppo_metrics = self.train_ppo_step(train_buffer1)
-                #ppo_metrics = {"policy_loss" "value_loss" "entropy_loss" "ppo_loss"}
-
-            # 5. 训练分配网络
-            alloc_metrics = self.train_allocator_step(train_buffer1, self.network)
-            #alloc_metrics = {"alloc_td_loss" "alloc_entropy_loss" "alloc_kl_total_loss"}
-
-        elif self.curriculum_level == 3:
-
-            # ppo的训练
-            train_buffers_list = []  # 存放多个 TrainingBuffer
-
-
-
-
+            # allocator 训练占位
+            alloc_metrics = {"alloc_kl_loss": 0.0, "alloc_mse_loss": 0.0, "alloc_kl_total_loss": 0.0,
+                             "alloc_td_loss": 0.0, "alloc_entropy_loss": 0.0, "alloc_total_loss": 0.0,
+                             "alloc_w_rew_corr": 0.0}
 
         # 更新课程学习
-        terminal_reward = raw_buffer.terminal_reward
+        terminal_reward = total / (i+1)
         curriculum_changed = self.curriculum_manager.on_episode_end(terminal_reward)
         self.curriculum_level = self.curriculum_manager.get_current_level()
 

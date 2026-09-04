@@ -1,7 +1,9 @@
 """
 奖励分配网络 (Reward Allocator)
-- 基于注意力机制将 terminal_reward 分配到序列每步
-- 损失: TD误差 + 负熵正则化（鼓励权重集中）
+- 基于注意力机制将 terminal_reward 分配到轨迹每步（softmax 输出权重 w，Σw=1）
+- 训练损失：
+    * 模仿（Level 0 / Level 1）：MSE(logits, log(target)) + 0.1·KL —— 让权重形状贴近密集奖励
+    * TD 自举（Level 1+ 过渡 / Level 2）：(R_term·w + γ·V(s_{t+1}) - V(s_t))² —— 无密集时的信用分配
 """
 
 from __future__ import annotations
@@ -546,65 +548,6 @@ class RewardAllocatorAgent:
 
         return weights, entropy
 
-    def allocate_logits(
-        self,
-        states: np.ndarray,
-        actions: np.ndarray,
-        actions_dist: np.ndarray,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        分配奖励（返回 logits，供模仿训练直接回归 log(target)）。
-
-        输入同 allocate；输出: (logits, weights, entropy)，均保留计算图。
-        """
-        with torch.no_grad():
-            states_t = torch.FloatTensor(states).to(self.device)
-            actions_t = torch.FloatTensor(actions).to(self.device)
-            actions_dist_t = torch.FloatTensor(actions_dist).to(self.device)
-
-        logits, weights, entropy = self.network.forward_logits(states_t, actions_t, actions_dist_t)
-
-        return logits, weights, entropy
-
-    # 模仿训练
-    def imitation_train_step(
-        self,
-        target_weights: torch.Tensor,
-        logits: torch.Tensor,
-    ) -> dict:
-        """模仿训练：让 logits 逼近 log(target_weights)（去均值后回归）。
-
-        对比 softmax 交叉熵（KL）：交叉熵梯度 = (w − t)，在 80 维归一化分布下
-        被 softmax 耦合 + batchmean(/80) 稀释到 ~1e-4，方向噪声大、学不动；
-        logits 回归的梯度 = (logits − log(target))，直接由 target 给定方向，
-        无 softmax 耦合、尺度大（log 域 ~1），训练快且稳定。
-
-        主损失：去均值后的 logits 与 log(target) 的 MSE（只约束形状，不约束 softmax 常数自由度）。
-        辅助损失：0.1 × softmax KL（数值尺度校准）。
-        """
-        self.network.train()
-
-        self.optimizer.zero_grad()
-
-        # 去均值：softmax 对 logits 整体平移不变，只约束形状
-        logits_c = logits - logits.mean(dim=-1, keepdim=True)
-        log_target = torch.log(target_weights + 1e-8)
-        log_target_c = log_target - log_target.mean(dim=-1, keepdim=True)
-
-        mse_loss = F.mse_loss(logits_c, log_target_c)  # 主损失：形状对齐
-
-        # 辅助：softmax 交叉熵（数值尺度校准，权重 0.1）
-        weights = F.softmax(logits, dim=-1)
-        kl_loss = F.kl_div(torch.log(weights + 1e-8), target_weights, reduction='batchmean')
-        total_loss = mse_loss + 0.1 * kl_loss
-
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=0.5)
-        self.optimizer.step()
-        self.step_count += 1
-        return {"kl_loss": kl_loss.item(), "mse_loss": mse_loss.item(), "kl_total_loss": total_loss.item()}
-
-
 
     # TD 训练
     def TD_train_step(
@@ -661,31 +604,5 @@ class RewardAllocatorAgent:
         """更新优化器学习率"""
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
-
-    def save(self, path: str):
-        """保存模型"""
-        torch.save({
-            'network_state_dict': self.network.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'config': self.config,
-            'step_count': self.step_count,
-        }, path)
-
-    def load(self, path: str):
-        """加载模型"""
-        checkpoint = torch.load(path, map_location=self.device)
-        self.network.load_state_dict(checkpoint['network_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.config = checkpoint['config']
-        self.step_count = checkpoint['step_count']
-
-    def get_parameters(self) -> dict:
-        """获取网络参数数量"""
-        total_params = sum(p.numel() for p in self.network.parameters())
-        trainable_params = sum(p.numel() for p in self.network.parameters() if p.requires_grad)
-        return {
-            'total': total_params,
-            'trainable': trainable_params,
-        }
 
 

@@ -3,10 +3,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from dataclasses import dataclass, field
-from typing import List, Tuple, Dict
-import torch.optim as optim
+from typing import List, Tuple
 
 
 # ============================================================================
@@ -175,18 +173,7 @@ class RawTrajectoryBuffer:
         return np.concatenate([self.means, self.log_stds], axis=-1)
 
     @property
-    def transition_count(self) -> int:
-        """实际 transition 数（observations 数减 1）"""
-        return len(self.observations) - 1
 
-    def clear(self):
-        self.observations.clear()
-        self.actions.clear()
-        self.means.clear()
-        self.log_stds.clear()
-        self.log_probs.clear()
-        self.values.clear()
-        self.terminal_reward = 0.0
 
     def __len__(self) -> int:
         return len(self.observations)
@@ -213,28 +200,7 @@ class TrainingBuffer:
     def __len__(self) -> int:
         return len(self.states)
 
-    def clear(self):
-        self.states.clear()
-        self.actions.clear()
-        self.next_states.clear()
-        self.rewards.clear()
-        self.advantages.clear()
-        self.returns.clear()
-        self.old_log_probs.clear()
-        self.weights = None
-        self.weights_entropy = None
-        self.terminal_reward = 0.0
 
-    def to_tensors(self, device: str = "cuda") -> Dict[str, torch.Tensor]:
-        return {
-            "states": torch.FloatTensor(np.array(self.states)).to(device),
-            "actions": torch.FloatTensor(np.array(self.actions)).to(device),
-            "next_states": torch.FloatTensor(np.array(self.next_states)).to(device),
-            "rewards": torch.FloatTensor(self.rewards).to(device),
-            "advantages": torch.FloatTensor(self.advantages).to(device),
-            "returns": torch.FloatTensor(self.returns).to(device),
-            "old_log_probs": torch.FloatTensor(self.old_log_probs).to(device),
-        }
 
 
 # ============================================================================

@@ -10,11 +10,7 @@ from typing import List, Optional, Dict, Any
 from collections import deque
 import numpy as np
 
-from fetch_env import (
-    EnvCurriculumParams,
-    CURRICULUM_PRESETS,
-    NUM_CURRICULUM_LEVELS,
-)
+from fetch_env import NUM_CURRICULUM_LEVELS
 
 
 # --- SlidingWindowStats ---
@@ -39,29 +35,6 @@ class SlidingWindowStats:
             return 0.0
         return float(np.mean(self._buffer))
 
-    def std(self) -> float:
-        """标准差"""
-        if len(self._buffer) <= 1:
-            return 0.0
-        return float(np.std(self._buffer))
-
-    def min(self) -> float:
-        """最小值"""
-        if len(self._buffer) == 0:
-            return 0.0
-        return float(np.min(self._buffer))
-
-    def max(self) -> float:
-        """最大值"""
-        if len(self._buffer) == 0:
-            return 0.0
-        return float(np.max(self._buffer))
-
-    def median(self) -> float:
-        """中位数"""
-        if len(self._buffer) == 0:
-            return 0.0
-        return float(np.median(self._buffer))
 
     def is_full(self) -> bool:
         """窗口是否已填满"""
@@ -70,18 +43,6 @@ class SlidingWindowStats:
     def count(self) -> int:
         """当前数据量"""
         return len(self._buffer)
-
-    def get_stats(self) -> Dict[str, float]:
-        """返回所有统计量"""
-        return {
-            "mean": self.mean(),
-            "std": self.std(),
-            "min": self.min(),
-            "max": self.max(),
-            "median": self.median(),
-            "count": self.count(),
-            "is_full": self.is_full(),
-        }
 
 
 @dataclass
@@ -124,12 +85,6 @@ class AdaptiveCurriculumManager:
 
         self.event_history: List[CurriculumEvent] = []
 
-    @property
-    def progress(self) -> float:
-        """当前等级的训练进度 [0, 1]，基于冷却进度。"""
-        if self.promote_cooldown == 0:
-            return 1.0
-        return 1.0 - (self.cooldown_remaining / self.promote_cooldown)
 
     def on_episode_end(
         self,
@@ -213,22 +168,4 @@ class AdaptiveCurriculumManager:
         """获取当前课程等级"""
         return self.current_level
 
-    def get_params(self) -> EnvCurriculumParams:
-        """获取当前等级对应的参数"""
-        return CURRICULUM_PRESETS[self.current_level]
 
-    def get_stats(self) -> Dict[str, Any]:
-        """获取当前统计信息"""
-        return {
-            "current_level": self.current_level,
-            "episode_count": self.episode_count,
-            "reward_stats": self.reward_window.get_stats(),
-            "cooldown_remaining": self.cooldown_remaining,
-            "since_last_change": self.since_last_change,
-            "level_episode_counts": dict(self.level_episode_counts),
-            "progress": self.progress,
-        }
-
-    def get_event_history(self) -> List[CurriculumEvent]:
-        """获取课程变化历史"""
-        return list(self.event_history)
