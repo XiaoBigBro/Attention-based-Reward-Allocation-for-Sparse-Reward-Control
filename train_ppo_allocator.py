@@ -28,7 +28,7 @@ from reward_allocator import RewardAllocatorAgent, RewardAllocatorConfig
 
 
 # =============================================================================
-# 统一配置 - 所有可调参数集中于此
+# 1. 统一配置 - 所有可调参数集中于此
 # =============================================================================
 
 @dataclass
@@ -38,67 +38,58 @@ class TrainingConfig:
     env_id: str = "FetchReach-v4"
     seed: int = 42
 
-    # PPO actor网络
+    # PPO actor网络参数
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 0.5#策略网络log标准差最大值
     log_std_init: float = 0.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
-    # PPO 训练
+    # PPO 训练的超参数
     '''
     gamma 控制的是“未来奖励的折现速度”。
     调小 gamma（比如 0.97）会让未来奖励衰减更快，
     实际上也是在“缩短”价值估计的依赖长度，也能起到一定的稳定作用。
     公式：G_t = r_t + gamma * G_{t+1} + gamma^2 * G_{t+2} + ... + gamma^n * G_{t+n}
-    '''
-    gamma: float = 0.99#折扣因子,控制未来奖励的权重
 
-    '''
-    决定了你信任多少步的 TD 误差。但是分配网络不稳定，也就导致TD误差不准确，
+    lam决定了你信任多少步的 TD 误差。但是分配网络不稳定，也就导致TD误差不准确，
     所以lam越小，策略更新越稳定。
     公式：A_t = delta_t + gamma * lam * A_{t+1} + gamma^2 * lam^2 * A_{t+2} + ... + gamma^n * lam^n * A_{t+n}
-    '''
-    lam: float = 0.9#GAE参数
-
-    clip_eps: float = 0.05#PPO裁剪参数,控制策略更新的稳定性.
-
-    '''
-    鼓励策略不要过早变“确定”。也就是说，
+    
+    entropy_coef鼓励策略不要过早变“确定”。也就是说，
     即使网络想减小 log_std 来“利用”，entropy_coef 也会“拉它一把”，让它保留一定的随机性。
     log_std 是 “策略自己决定的探索力度”。
     entropy_coef 是 “外部强推的探索压力”。
+    
+    价值估计震荡严重 降低 value_clip_eps（如 0.1），降低 tau（如 0.005）
+    
+    tau=0.01 是 DQN/PPO 的标准值，稳定可靠。如果训练震荡，可以降到 0.005。
     '''
-    entropy_coef: float = 0.001  # 熵正则化系数
 
+    gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
+    lam: float = 0.9#GAE参数
+    clip_eps: float = 0.05#PPO裁剪参数,控制策略更新的稳定性.
+    entropy_coef: float = 0.001  # 熵正则化系数
     actor_lr: float = 3e-4  # 策略网络学习率
     critic_lr: float = 1e-4  # 价值网络学习率
     actor_lr_level2: float = 3e-5#课程学习等级2的策略网络学习率
     critic_lr_level2: float = 1e-4#课程学习等级2的价值网络学习率
+    max_grad_norm: float = 0.5  # 最大梯度范数，防止梯度爆炸
+    value_clip_eps: float = 0.2  # 价值裁剪 epsilon，防止价值估计过拟合
+    tau: float = 0.01  # 目标网络更新参数
 
+    # level0中PPO 训练框架的参数
     '''
-    PPO训练epochs,越大样本利用率越高，但训练时间越长容易过拟合，
-    #越小训练时间越短，但样本利用率越低
+    PPO训练ppo_epochs,越大样本利用率越高，但训练时间越长容易过拟合，越小训练时间越短，但样本利用率越低
+    
+    价值网络每 epoch 更新critic_updates_per_epoch次（仅全 level0 更新模式使用；level1 模式每小批 1 次）。
+    注意：每 epoch 更新次数过高会让 critic 在少量样本上过拟合、估值摆动，
+    已从 6 降到 2 以稳定训练（配合多 episode 累积更新）。
     '''
-    ppo_epochs: int = 4
+    ppo_epochs: int = 4 #每批数据训练多少次
     ppo_update_interval: int = 5 #收集多少回合再进行训练（Level 0 / 兜底分支用：每回合采 5 集后全 batch 更新一次）
-    # 价值网络每 epoch 更新次数（仅全 batch 更新模式使用；mini-batch 模式每小批 1 次）。
-    # 注意：每 epoch 更新次数过高会让 critic 在少量样本上过拟合、估值摆动，
-    # 已从 6 降到 2 以稳定训练（配合多 episode 累积更新）。
-    critic_updates_per_epoch: int = 2
+    critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
 
-    max_grad_norm: float = 0.5#最大梯度范数，防止梯度爆炸
-
-    '''
-    价值估计震荡严重 降低 value_clip_eps（如 0.1），降低 tau（如 0.005）
-    '''
-    value_clip_eps: float = 0.2#价值裁剪 epsilon，防止价值估计过拟合
-
-    '''
-    tau=0.01 是 DQN/PPO 的标准值，稳定可靠。如果训练震荡，可以降到 0.005。
-    '''
-    tau: float = 0.01#目标网络更新参数
-
-    # 奖励分配网络初始化
+    # 奖励分配网络超参数
     alloc_d_model: int = 64#奖励分配网络隐藏层维度
     alloc_num_heads: int = 4#奖励分配网络头数
     alloc_num_layers: int = 2#奖励分配网络层数
@@ -106,7 +97,7 @@ class TrainingConfig:
     alloc_dropout: float = 0.2#奖励分配网络dropout率
     max_seq_len: int = 100#奖励分配网络最大序列长度
 
-    # 模仿训练
+    # 分配网络level0模仿训练参数
     temperature: float = 0.5#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）。
     # 0.1 会 softmax 塌缩成 one-hot（权重全给最高奖励步，推进步信号消失）；
     # 0.5 时 target 为"保持>推进>后退"（约 148:20:2.7），可学且梯度足够强（比 1.0 强约 10 倍）；
@@ -116,9 +107,13 @@ class TrainingConfig:
     imitation_epochs: int = 5#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
     imitation_dataset_size: int = 1000#离线训练数据集大小（每 100 次训练时用当前 PPO 现采 N 回合组成固定数据集）
 
-    #奖励分配网络正常训练
+    #奖励分配网络level1训练参数
     alloc_entropy_coef: float = 0.05  # 奖励分配网络熵正则化系数
     alloc_lr: float = 1e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
+    level1_alloc_epochs: int = 3  # 每块分配网络训练 epoch 数（200 集 / 16 批 ≈ 13 批/epoch）
+    level1_alloc_batch_episodes: int = 16  # 每批回合数（batch 维 = 回合）
+    level1_alloc_max_beta: float = 0.9  # β 上限（α=1 时仍留 0.1 模仿锚，防纯 TD 自举崩）
+
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
@@ -133,10 +128,6 @@ class TrainingConfig:
     # α 按 level1 内真实集数（已完成块数 × level1_collect_episodes）/ curriculum_promote_cooldown 推进，超过 cooldown 恒为 1
     level1_collect_episodes: int = 200#Level 1 每个 episode_count 采集的回合数（一个块）
     level1_mini_batch_size: int = 512#Level 1 PPO mini-batch 大小（时间步）
-    # Level 1 分配网络训练（块末批量训练；老师随 α 从 dense 平滑切换到 critic 的 TD 自举）
-    level1_alloc_epochs: int = 3           # 每块分配网络训练 epoch 数（200 集 / 16 批 ≈ 13 批/epoch）
-    level1_alloc_batch_episodes: int = 16  # 每批回合数（batch 维 = 回合）
-    level1_alloc_max_beta: float = 0.9     # β 上限（α=1 时仍留 0.1 模仿锚，防纯 TD 自举崩）
 
     # 训练流程
     total_episodes: int = 10000
@@ -145,14 +136,12 @@ class TrainingConfig:
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
     device: str = "cuda" if torch.cuda.is_available() else "cpu"  # 设备（自动检测）
 
-
 @dataclass
 class TrainingMetrics:
     """训练指标：记录每个 episode 的各项损失和奖励，用于日志和绘图"""
     # 基础信息
     episode: int = 0#回合数
     terminal_reward: float = 0.0#回合结束奖励
-    episode_length: int = 0#回合长度
 
     # PPO 损失
     policy_loss: float = 0.0#策略网络损失
@@ -165,17 +154,15 @@ class TrainingMetrics:
     alloc_total_loss: float = 0.0#分配网络总损失
     alloc_kl_loss: float = 0.0#分配网络KL损失
     alloc_mse_loss: float = 0.0#分配网络MSE损失
-    alloc_kl_total_loss: float = 0.0  # 分配网络总损失
     alloc_w_rew_corr: float = 0.0  # 分配网络输出权重与密集奖励的相关性（诊断：是否学会"高奖励步权重高"）
 
 
     # 课程学习状态
     curriculum_level: int = 0#课程学习等级
-    curriculum_changed: str = ""#课程学习变化
     log_std: float = 0.0#策略网络的log标准差
 
 # ============================================================================
-# 1. 训练器
+# 2. 训练器
 # ============================================================================
 
 class PPOTrainerWithAllocator:
@@ -1072,9 +1059,7 @@ class PPOTrainerWithAllocator:
         metrics = TrainingMetrics(
             episode=self.episode_count,
             terminal_reward=terminal_reward,
-            episode_length=len(raw_buffer) - 1,  # observations 有 N+1 个，transition 数为 N
             curriculum_level=self.curriculum_level,
-            curriculum_changed=str(curriculum_changed),
             **{**ppo_metrics, **alloc_metrics},
         )
 
@@ -1215,7 +1200,7 @@ class PPOTrainerWithAllocator:
         self.curriculum_manager.event_history = list(cs["event_history"])
 
 # ============================================================================
-# 2. 随机数种子设置
+# 3. 随机数种子设置
 # ============================================================================
 
 def set_seed(seed: int):
@@ -1233,33 +1218,47 @@ def set_seed(seed: int):
         torch.backends.cudnn.benchmark = False
 
 # ============================================================================
-# 2. 主函数
+# 4. 命令行解析
 # ============================================================================
 
-def main():
-    """主函数"""
+def parse_and_set_config(config):
+    """解析命令行参数并设置配置"""
     # 解析命令行参数
-    parser = argparse.ArgumentParser()#解析命令行参数，description=	设置帮助信息，运行 python script.py -h 时会显示这段文字
+    parser = argparse.ArgumentParser()#解析命令行参数
     parser.add_argument("--seed", type=int, default=42)#--seed 指定随机种子，default=None 表示没有指定时使用默认值 42
-    parser.add_argument("--gpu", type=str, default="")
+    parser.add_argument("--gpu", type=str, default=0)
     args = parser.parse_args()#解析命令行参数，返回一个Namespace对象，包含所有参数的值
-
-    # 创建配置
-    config = TrainingConfig()
 
     # 如果命令行指定了 seed，覆盖默认值
     if args.seed is not None:
         config.seed = args.seed
 
     # 如果命令行指定了 GPU，覆盖设备（01/02/03 → cuda:0/1/2）
-    if args.gpu:
+    if args.gpu is not None:
+
         gpu_id = int(args.gpu)
+
         if torch.cuda.is_available():
-            if gpu_id >= torch.cuda.device_count():
-                print(f"警告: --gpu {args.gpu} 超出可用 GPU 数 {torch.cuda.device_count()}，回退到 cuda:0")
+
+            if gpu_id >= torch.cuda.device_count():#gpu的索引从0开始，但是device_count返回的是个数
                 gpu_id = 0
             config.device = f"cuda:{gpu_id}"
+    
+    return config
 
+# ============================================================================
+# 5. 主函数
+# ============================================================================
+
+def main():
+    """主函数"""
+
+    # 创建配置参数
+    config = TrainingConfig()
+
+    # 解析命令行参数并设置配置
+    config = parse_and_set_config(config)
+    
     # 设置随机数种子
     set_seed(config.seed)
 
@@ -1269,5 +1268,8 @@ def main():
     # 开始训练
     trainer.train()
 
+
 if __name__ == "__main__":
     main()
+
+
