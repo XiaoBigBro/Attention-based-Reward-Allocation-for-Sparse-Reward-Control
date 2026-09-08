@@ -176,7 +176,6 @@ class PPOTrainerWithAllocator:
         4. 训练 PPO + 分配网络
         5. 更新课程学习
     """
-
     def __init__(self, config: TrainingConfig):
         self.config = config
 
