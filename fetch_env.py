@@ -4,8 +4,8 @@ FETCH 环境改造 + 课程学习接口
 - 4 档预设难度（0~3），可动态切换
 """
 
-from __future__ import annotations
 
+from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
@@ -36,7 +36,6 @@ CURRICULUM_PRESETS = {
     2: EnvCurriculumParams(target_range=0.32, success_threshold=0.06, max_episode_steps=80,dense_reward=False),
     3: EnvCurriculumParams(target_range=0.34, success_threshold=0.05, max_episode_steps=80,dense_reward=False),
 }
-
 
 # ---------------------------------------------------------------------------
 # 2. 奖励计算
@@ -107,10 +106,8 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         self._sync_target_range()#同步 target_range 到底层 env（供 _sample_goal 使用）
 
     # ------------------------------------------------------------------
-    # 课程接口（Step 2 直接调用）
+    # 课程接口
     # ------------------------------------------------------------------
-
-
 
     def set_curriculum_level(self, level: int, ) -> None:
         """切换到指定难度等级（0..5；0 为密集档，1..5 为稀疏档）。"""
@@ -121,7 +118,6 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         self._dense_reward = self._params.dense_reward  # Level 0 用稠密，Level 1+ 用稀疏
         self._sync_target_range()
 
-
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
@@ -129,7 +125,6 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
     def _sync_target_range(self) -> None:
         """
         将 target_range 和 distance_threshold 写入底层 Fetch env 的 unwrapped。
-
         必须成功写入，否则立即报错，避免静默失败导致课程难度未生效。
         """
         unwrapped = self.unwrapped
@@ -219,25 +214,8 @@ def make_fetch_env(
     curriculum_level: int ,
     render_mode: Optional[str] = None,
 ) -> EpisodicDwellRewardWrapper:
-    """
-    创建 FetchReach-v3 / FetchPush-v3 环境，并包上 EpisodicDwellRewardWrapper。
 
-    Parameters
-    ----------
-    env_id : str
-        环境 ID，如 "FetchReach-v3" / "FetchPush-v3"
-    curriculum_level : int
-        难度等级 0（易）/ 1（中）/ 2（难）/3（最难）
-    render_mode : str, optional
-        渲染模式，如 "human" / "rgb_array"
-    dense_reward : bool
-        是否使用稠密奖励模式。True 时每步返回即时奖励，False 时返回稀疏奖励。
-
-    Returns
-    -------
-    EpisodicDwellRewardWrapper
-    """
-    base_env = gym.make(env_id, render_mode=render_mode, max_episode_steps=10000)
+    base_env = gym.make(env_id, render_mode=render_mode, max_episode_steps=1000)
     wrapped = EpisodicDwellRewardWrapper(base_env, curriculum_level)
     return wrapped
 

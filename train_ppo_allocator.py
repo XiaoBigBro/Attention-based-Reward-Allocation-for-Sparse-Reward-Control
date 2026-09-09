@@ -709,7 +709,7 @@ class PPOTrainerWithAllocator:
                 d = torch.FloatTensor(D[idx]).to(device)      # [B, 80, 2*act]
                 t = torch.FloatTensor(T[idx]).to(device)      # [B, 80]
 
-                logits, w, _ = self.allocator_agent.network.forward_logits(s, a, d)  # [B, 80]
+                logits, w, _ = self.allocator_agent.network(s, a, d)  # [B, 80]
 
                 # logits 回归 log(target)（去均值，只约束形状）
                 logits_c = logits - logits.mean(dim=-1, keepdim=True)
@@ -736,7 +736,7 @@ class PPOTrainerWithAllocator:
                 s = torch.FloatTensor(S[i:i+1]).to(device)
                 a = torch.FloatTensor(A[i:i+1]).to(device)
                 d = torch.FloatTensor(D[i:i+1]).to(device)
-                _, w, _ = self.allocator_agent.network.forward_logits(s, a, d)
+                _, w, _ = self.allocator_agent.network(s, a, d)
                 wn = w.cpu().numpy()[0]
                 if R[i].std() > 1e-9:
                     corrs.append(float(np.corrcoef(R[i], wn)[0, 1]))
@@ -810,7 +810,7 @@ class PPOTrainerWithAllocator:
                 o = O[idx]                        # [B, T+1, obs]
 
                 # allocator 当前参数前向（带图）
-                logits, w, _ = self.allocator_agent.network.forward_logits(s, a, d)   # w softmax [B,T]
+                logits, w, _ = self.allocator_agent.network(s, a, d)   # w softmax [B,T]
 
                 # --- L_im：模仿 dense 形状（与 Level 0 相同结构） ---
                 logits_c = logits - logits.mean(dim=-1, keepdim=True)
@@ -846,7 +846,7 @@ class PPOTrainerWithAllocator:
         with torch.no_grad():
             for i in range(n_eps):
                 s, a, d = S[i:i+1], A[i:i+1], D[i:i+1]
-                _, w, _ = self.allocator_agent.network.forward_logits(s, a, d)
+                _, w, _ = self.allocator_agent.network(s, a, d)
                 wn = w.cpu().numpy()[0]
                 dense_i = np.array(block[i].step_rewards, dtype=np.float32)
                 if dense_i.std() > 1e-9:

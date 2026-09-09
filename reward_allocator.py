@@ -5,13 +5,14 @@
     * 模仿（Level 0 / Level 1）：MSE(logits, log(target)) + 0.1·KL —— 让权重形状贴近密集奖励
     * TD 自举（Level 1+ 过渡 / Level 2）：(R_term·w + γ·V(s_{t+1}) - V(s_t))² —— 无密集时的信用分配
 """
+from __future__ import annotations
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from ppo import TrainingBuffer
-from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import List, Tuple
 
@@ -238,26 +239,8 @@ class CrossAttentionLayer(nn.Module):
 
         return x
 
+#分配网络
 class RewardAllocator(nn.Module):
-    """基于注意力机制的奖励分配网络。
-
-    注意力设计:
-        Q = 状态对 concat[s_i, s_{i+1}]（增量信息载体：贡献 Δd = d(s_i) − d(s_{i+1})）
-        K = action_dist (动作分布: mean + log_std)
-        V = actions (实际采取的动作 a_0..a_{N-1})
-
-    对齐约定（输入 N 个有效 transition，无 dummy）:
-        position i (0-based) 对应 transition i:
-            Q = concat[s_i, s_{i+1}]（执行 a_i 前后的状态对）
-            K = dist_i（动作 a_i 的分布）
-            V = a_i（实际动作）
-        输出权重 w_i 分配给 transition i
-
-    特点:
-        - Q/K/V 三路均注入位置编码（保持时间语义一致）
-        - 状态自注意力与交叉注意力均无因果掩码（事后分配允许看全局）
-        - 输出两层 MLP → softmax，Σw = 1
-    """
 
     def __init__(
         self,
@@ -328,7 +311,7 @@ class RewardAllocator(nn.Module):
         states: torch.Tensor,
         actions: torch.Tensor,
         actions_dist: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         前向传播
 
@@ -350,36 +333,9 @@ class RewardAllocator(nn.Module):
         else:
             squeeze_output = False
 
-        _, weights, entropy = self._forward_no_squeeze(states, actions, actions_dist)
-
-        # 如果输入是单序列，压缩输出
-        if squeeze_output:
-            weights = weights.squeeze(0)
-            entropy = entropy.squeeze(0)
-
-        return weights, entropy
-
-    def forward_logits(
-        self,
-        states: torch.Tensor,
-        actions: torch.Tensor,
-        actions_dist: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """前向传播（返回 logits，供模仿训练直接回归 log(target)）。
-
-        输入同 forward；输出: (logits, weights, entropy)。
-        logits 是 softmax 之前的原始分数（去均值后形状与 log(target) 对应）。
-        """
-        if states.dim() == 2:
-            states = states.unsqueeze(0)
-            actions = actions.unsqueeze(0)
-            actions_dist = actions_dist.unsqueeze(0)
-            squeeze_output = True
-        else:
-            squeeze_output = False
-
         logits, weights, entropy = self._forward_no_squeeze(states, actions, actions_dist)
 
+        # 如果输入是单序列，压缩输出
         if squeeze_output:
             logits = logits.squeeze(0)
             weights = weights.squeeze(0)
@@ -394,17 +350,7 @@ class RewardAllocator(nn.Module):
         v_online: torch.Tensor,
         v_target_next: torch.Tensor,
     ) -> Tuple[torch.Tensor, dict]:
-        """
-        计算 TD 误差损失 + 熵正则化。
 
-        输入:
-            train_buffer: TrainingBuffer
-            gamma: float
-            v_online: [N] V(s_1)...V(s_N)，已断开 Critic 计算图
-            v_target_next: [N] V(s_2)...V(s_{N+1})
-
-        weights 和 entropy 来自 train_buffer，保留着分配网络的计算图。
-        """
         # weights 是 tensor，直接使用（保留计算图供反向传播）
         weights_td = train_buffer.weights.to(v_online.device)
         terminal_reward = train_buffer.terminal_reward
@@ -463,7 +409,7 @@ class RewardAllocator(nn.Module):
 
         entropy = -(weights * torch.log(weights + 1e-8)).sum(dim=-1)
 
-        return logits, weights, entropy#logits、权重、熵
+        return logits, weights, entropy
 
 
 # --- RewardAllocatorAgent ---
@@ -592,5 +538,3 @@ class RewardAllocatorAgent:
         """更新优化器学习率"""
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
-
-
