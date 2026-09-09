@@ -5,8 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
+from typing import Dict
 from collections import deque
 import numpy as np
 
@@ -15,7 +14,6 @@ from fetch_env import NUM_CURRICULUM_LEVELS
 
 # --- SlidingWindowStats ---
 class SlidingWindowStats:
-    """固定大小的滑动窗口，自动计算统计量。"""
 
     def __init__(self, window_size: int):
         self.window_size = window_size
@@ -44,20 +42,8 @@ class SlidingWindowStats:
         """当前数据量"""
         return len(self._buffer)
 
-
-@dataclass
-class CurriculumEvent:
-    """课程等级变化事件"""
-    episode: int
-    old_level: int
-    new_level: int
-    reason: str  # "promote", "demote"
-    reward_mean: float
-    reward_threshold: float
-
-
+"""基于滑动窗口奖励的自动课程学习（升降级）。"""
 class AdaptiveCurriculumManager:
-    """基于滑动窗口奖励的自动课程学习（升降级）。"""
 
     def __init__(
         self,
@@ -83,14 +69,11 @@ class AdaptiveCurriculumManager:
 
         self.reward_window = SlidingWindowStats(window_size)
 
-        self.event_history: List[CurriculumEvent] = []
-
-
     def on_episode_end(
         self,
         terminal_reward: float,
-        info: Optional[Dict[str, Any]] = None,
     ) -> bool:
+
         self.episode_count += 1
         self.level_episode_counts[self.current_level] += 1
         self.since_last_change += 1
@@ -102,8 +85,9 @@ class AdaptiveCurriculumManager:
 
         return self._check_curriculum_change()
 
+    """检查是否触发课程切换（窗口均值 + 冷却 + 阈值判断）。"""
     def _check_curriculum_change(self) -> bool:
-        """检查是否触发课程切换（窗口均值 + 冷却 + 阈值判断）。"""
+
         if not self.reward_window.is_full():
             return False
 
@@ -122,50 +106,24 @@ class AdaptiveCurriculumManager:
 
     def _promote(self, mean_reward: float, threshold: float) -> bool:
         """执行升级操作。"""
-        old_level = self.current_level
-        self.current_level += 1
 
+        self.current_level += 1
         self.cooldown_remaining = self.promote_cooldown
         self.level_episode_counts[self.current_level] = 0
-
         self.reward_window.clear()
-
-        event = CurriculumEvent(
-            episode=self.episode_count,
-            old_level=old_level,
-            new_level=self.current_level,
-            reason="promote",
-            reward_mean=mean_reward,
-            reward_threshold=threshold,
-        )
-        self.event_history.append(event)
 
         return True
 
     def _demote(self, mean_reward: float, threshold: float) -> bool:
         """执行降级操作。"""
-        old_level = self.current_level
-        self.current_level -= 1
 
+        self.current_level -= 1
         self.cooldown_remaining = self.demote_cooldown
         self.level_episode_counts[self.current_level] = 0
-
         self.reward_window.clear()
-
-        event = CurriculumEvent(
-            episode=self.episode_count,
-            old_level=old_level,
-            new_level=self.current_level,
-            reason="demote",
-            reward_mean=mean_reward,
-            reward_threshold=threshold,
-        )
-        self.event_history.append(event)
 
         return True
 
     def get_current_level(self) -> int:
         """获取当前课程等级"""
         return self.current_level
-
-

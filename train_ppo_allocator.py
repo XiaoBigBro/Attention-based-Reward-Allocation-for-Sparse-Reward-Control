@@ -310,7 +310,6 @@ class PPOTrainerWithAllocator:
 
         return merged
 
-
     def _build_state_pairs(self, observations: List[np.ndarray]) -> np.ndarray:
         """把 N+1 个观测序列构造成 N 个状态对 concat[s_i, s_{i+1}]（分配网络 Q 输入）"""
         obs_arr = np.array(observations, dtype=np.float32)          # [N+1, obs_dim]
@@ -877,8 +876,6 @@ class PPOTrainerWithAllocator:
             分配网络每 50 个回合离线采集 imitation_dataset_size 集做模仿训练。
             ppo每回合采集ppo_update_interval集做训练
             '''
-
-
             # 离线训练分配网络（模仿训练）：每 50 回合触发一次，
             # 先用当前 PPO 现场采集 imitation_dataset_size 集组成固定数据集，
             # 再打乱分批(16/批) 多 epoch(5) 训练，训练完清空
@@ -890,9 +887,8 @@ class PPOTrainerWithAllocator:
                 self.raw_buffer_list = []
             else:
                 # 未到离线训练时，alloc_metrics 用默认值（metrics 构造需要）
-                alloc_metrics = {"alloc_kl_loss": 0.0, "alloc_mse_loss": 0.0, "alloc_kl_total_loss": 0.0,
-                                 "alloc_td_loss": 0.0, "alloc_entropy_loss": 0.0, "alloc_total_loss": 0.0,
-                                 "alloc_w_rew_corr": 0.0}
+                alloc_metrics = {"alloc_kl_loss": 0.0, "alloc_mse_loss": 0.0,
+                                 "alloc_td_loss": 0.0, "alloc_entropy_loss": 0.0,"alloc_w_rew_corr": 0.0}
 
             # 采集 ppo_update_interval 集（全 batch 更新用）
             train_buffers_list = []  # 存放多个 TrainingBuffer
@@ -1071,14 +1067,13 @@ class PPOTrainerWithAllocator:
         return metrics
 
     def train(self):
-        """主训练循环"""
+
         print("\n" + "=" * 60)
         print("开始训练")
         print("=" * 60)
 
         # 统计
         terminal_rewards = []#最终奖励
-        curriculum_levels = []#课程等级
         
         # 主循环，会在终端中显示一个动态进度条
         pbar = tqdm(total=self.config.total_episodes, desc="Training")
@@ -1091,7 +1086,6 @@ class PPOTrainerWithAllocator:
 
             # 记录
             terminal_rewards.append(metrics.terminal_reward)
-            curriculum_levels.append(metrics.curriculum_level)
 
             # 日志
             if self.episode_count % self.config.log_interval == 0:
