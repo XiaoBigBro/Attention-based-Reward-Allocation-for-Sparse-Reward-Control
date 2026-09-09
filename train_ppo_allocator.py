@@ -86,7 +86,7 @@ class TrainingConfig:
     已从 6 降到 2 以稳定训练（配合多 episode 累积更新）。
     '''
     ppo_epochs: int = 4 #每批数据训练多少次
-    ppo_update_interval: int = 5 #收集多少回合再进行训练（Level 0 / 兜底分支用：每回合采 5 集后全 batch 更新一次）
+    ppo_update_interval: int = 50 #收集多少回合再进行训练（Level 0 / 兜底分支用：每回合采 5 集后全 batch 更新一次）
     critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
 
     # 奖励分配网络超参数
@@ -259,6 +259,7 @@ class PPOTrainerWithAllocator:
         #   Level 0 分支每 episode_count 检查一次，到离线训练时机（episode_count % 50 == 0）
         #   就现场采集 imitation_dataset_size 集组成固定数据集训练分配网络，训练完清空。
         self.raw_buffer_list: List[RawTrajectoryBuffer] = []
+        self.states_arr, self.actions_arr, self.dists_arr, self.targets_arr, self.rewards_arr = [], [], [], [], []
 
         # --- Level 1 训练状态（混合奖励过渡 PPO + mini-batch 块式训练） ---
         # _l1_alpha: 当前块的 α。块首（采集前）按 level1 内真实集数算一次、整块固定；
@@ -304,10 +305,6 @@ class PPOTrainerWithAllocator:
         merged.next_states = []  # 训练不需要
         merged.rewards = []  # 训练不需要
 
-        merged.weights = None  # 训练不需要
-        merged.weights_entropy = None  # 训练不需要
-        merged.terminal_reward = 0.0  # 训练不需要
-
         return merged
 
     def _build_state_pairs(self, observations: List[np.ndarray]) -> np.ndarray:
@@ -317,23 +314,23 @@ class PPOTrainerWithAllocator:
         return pairs
 
     def collect_trajectory(self) -> RawTrajectoryBuffer:
+
         """采集一个回合的轨迹"""
         buffer = RawTrajectoryBuffer()
-
         obs, info = self.env.reset()
         obs = unpack_obs(obs)
-
         done = False
+
         while not done:
             # 获取动作
-            action, log_std, mean, log_prob, value = self._policy_fn(obs)
+            action, log_std, mean, log_prob, value = self._policy_fn(obs)#在cpu上
 
             # 与环境交互
             next_obs, terminated, truncated, info = self.env.step(action)
             next_obs = unpack_obs(next_obs)
 
             # 存储
-            buffer.add(obs, action, mean, log_std, log_prob, value)
+            buffer.add(obs, action, mean, log_std, log_prob, value)#在cpu上
 
             # 检查结束
             done = truncated
@@ -379,9 +376,7 @@ class PPOTrainerWithAllocator:
     def compute_gae_and_train_buffer(
         self,
         buffer: RawTrajectoryBuffer,#长度为N+1
-        allocated_rewards: torch.Tensor,#长度为N
-        weights,
-        entropy,
+        allocated_rewards: np.array,#长度为N
     ) -> TrainingBuffer:
         """计算 GAE 并构建训练缓冲区"""
         # 实际 transition 数 N (observations 有 N+1 个，包含 terminal state)
@@ -390,7 +385,7 @@ class PPOTrainerWithAllocator:
         observations = buffer.observations  # 长度 N+1: s_0, ..., s_N
 
         # 重新计算价值（使用 observations 序列）
-        obs_tensor = torch.FloatTensor(np.array(observations)).to(self.device)
+        obs_tensor = torch.FloatTensor(np.array(observations,dtype=np.float32)).to(self.device)
         with torch.no_grad():
             critic_values = self.network.get_value(obs_tensor).squeeze(-1).cpu().numpy().tolist()
             target_values = self.network.get_target_value(obs_tensor).squeeze(-1).cpu().numpy().tolist()
@@ -411,25 +406,23 @@ class PPOTrainerWithAllocator:
 
         # 构建训练缓冲区（长度为 N）
         train_buffer = TrainingBuffer()
-        train_buffer.terminal_reward = buffer.terminal_reward
-        # weights 保持为 tensor（保留计算图，供 compute_td_loss 反向传播到分配网络）
-        if isinstance(weights, torch.Tensor):
-            train_buffer.weights = weights.cpu()
-        else:
-            train_buffer.weights = torch.tensor(weights, dtype=torch.float32)
 
-        # 权重分布的熵（保留计算图，供 compute_td_loss 使用，避免重复计算）
-        if entropy is not None:
-            train_buffer.weights_entropy = entropy.cpu()
+        train_buffer.states = observations[:N]  # s_0...s_{N-1}
+        train_buffer.actions = actions[1:N + 1]  # a_0...a_{N-1}（已偏移）
+        train_buffer.rewards = allocated_rewards.tolist()  # 转为 list（因为字段是 List[float]）
+        train_buffer.advantages = advantages[:N]  # 长度 N
+        train_buffer.returns = returns[:N]  # 长度 N
+        train_buffer.old_log_probs = log_probs[:N]  # 长度 N
+        train_buffer.next_states = observations[1:N + 1]  # s_1...s_N
 
-        for i in range(N):
-            train_buffer.states.append(observations[i])  # s_i
-            train_buffer.actions.append(buffer.actions[i + 1])  # a_i (shifted)
-            train_buffer.rewards.append(allocated_rewards[i])  # r_i
-            train_buffer.advantages.append(advantages[i])
-            train_buffer.returns.append(returns[i])
-            train_buffer.old_log_probs.append(buffer.log_probs[i])  # log π(a_i|s_i)
-            train_buffer.next_states.append(observations[i + 1])  # s_{i+1}
+        # for i in range(N):
+        #     train_buffer.states.append(observations[i])  # s_i
+        #     train_buffer.actions.append(buffer.actions[i + 1])  # a_i (shifted)
+        #     train_buffer.rewards.append(allocated_rewards[i])  # r_i
+        #     train_buffer.advantages.append(advantages[i])
+        #     train_buffer.returns.append(returns[i])
+        #     train_buffer.old_log_probs.append(buffer.log_probs[i])  # log π(a_i|s_i)
+        #     train_buffer.next_states.append(observations[i + 1])  # s_{i+1}
 
         return train_buffer
 
@@ -631,41 +624,14 @@ class PPOTrainerWithAllocator:
             "entropy_loss": total_entropy_loss / max(n_actor_updates, 1),
         }
 
+    def clear_allocator_buffer(self):
 
-    def collect_allocator_dataset(self, num_episodes: int) -> Dict[str, np.ndarray]:
-        """用当前 PPO 策略采集 num_episodes 个回合，**采集时就完成预处理**，
-        直接产出分配网络的离线训练数据集（开箱即用，训练时不再预处理）。
-
-        数据集每个样本 = 一个完整回合（分配网络的输入+监督，softmax 回合内归一化）:
-            states:   [N, 80, 2*obs]   状态对 concat[s_i, s_{i+1}]（前后两个时间步）
-            actions:  [N, 80, act]     实际动作
-            dists:    [N, 80, 2*act]   动作分布 (mean, log_std)
-            targets:  [N, 80]          softmax(exp(r/T)) 模仿目标（Σ=1）
-            rewards:  [N, 80]          密集奖励（诊断 corr 用）
-
-        采集期间不更新任何网络（PPO 停在当前状态），保证数据集是同一时刻策略的固定快照。
-        """
-        self.network.eval()
-        states_arr, actions_arr, dists_arr, targets_arr, rewards_arr = [], [], [], [], []
-        for _ in range(num_episodes):
-            rb = self.collect_trajectory()
-            dense = np.array(rb.step_rewards, dtype=np.float32)                        # [80]
-            imp = np.exp(dense / self.config.temperature)
-            target = imp / imp.sum()                                                   # [80] Σ=1
-            states_arr.append(self._build_state_pairs(rb.observations))                # [80, 2*obs]
-            actions_arr.append(np.array(rb.actions[1:], dtype=np.float32))             # [80, act]
-            dists_arr.append(np.array(rb.get_action_dist()[1:], dtype=np.float32))     # [80, 2*act]
-            targets_arr.append(target)
-            rewards_arr.append(dense)
-        self.network.train()
-        dataset = {
-            "states": np.array(states_arr),
-            "actions": np.array(actions_arr),
-            "dists": np.array(dists_arr),
-            "targets": np.array(targets_arr),
-            "rewards": np.array(rewards_arr),
-        }
-        return dataset
+        self.raw_buffer_list = []
+        self.states_arr = []
+        self.actions_arr = []
+        self.dists_arr = []
+        self.targets_arr = []
+        self.rewards_arr = []
 
     def train_allocator_step_imitation(self, dataset) -> Dict[str, float]:
         """训练奖励分配网络（模仿训练）：批量 mini-batch 流程（离线）
@@ -872,48 +838,54 @@ class PPOTrainerWithAllocator:
           - Level >= 2（兜底）: 一个回合 = 采 ppo_update_interval(5) 集 → 全 batch 训练 PPO 一次
         课程窗口（promote/demote 依据）统一在回合末对块末那一集 on_episode_end 计入一次。"""
         if self.curriculum_level == 0:
-            '''level 0：密集奖励模式。PPO 用真实密集奖励信号做全 batch 训练；
-            分配网络每 50 个回合离线采集 imitation_dataset_size 集做模仿训练。
+            '''
+            level 0：密集奖励模式。PPO 用真实密集奖励信号做全 batch 训练；
+            分配网络离线采集 imitation_dataset_size 集做模仿训练。
             ppo每回合采集ppo_update_interval集做训练
             '''
-            # 离线训练分配网络（模仿训练）：每 50 回合触发一次，
-            # 先用当前 PPO 现场采集 imitation_dataset_size 集组成固定数据集，
-            # 再打乱分批(16/批) 多 epoch(5) 训练，训练完清空
-            if self.episode_count % 50 == 0 and self.episode_count != 0:
+            train_buffers_list = []  # 存放多个 TrainingBuffer
+            total = 0.0
+            self.network.eval()
+            for i in range(self.config.ppo_update_interval):
 
-                self.raw_buffer_list = self.collect_allocator_dataset(self.config.imitation_dataset_size)
+                # 1. 采集轨迹
+                raw_buffer = self.collect_trajectory()
+                total += raw_buffer.terminal_reward
+
+                # 2. 奖励 = 真实密集奖励
+                dense_rewards = np.array(raw_buffer.step_rewards,dtype=np.float32)  # 转为 numpy array
+
+                #收集分配网络的数据
+                imp = np.exp(dense_rewards / self.config.temperature)
+                target = imp / imp.sum()
+                self.states_arr.append(self._build_state_pairs(raw_buffer.observations))  # [80, 2*obs]
+                self.actions_arr.append(np.array(raw_buffer.actions[1:], dtype=np.float32))  # [80, act]
+                self.dists_arr.append(np.array(raw_buffer.get_action_dist()[1:], dtype=np.float32))  # [80, 2*act]
+                self.targets_arr.append(target)
+                self.rewards_arr.append(dense_rewards)
+
+                # 3. 计算 GAE 并构建训练缓冲区
+                train_buffer = self.compute_gae_and_train_buffer(raw_buffer, dense_rewards )
+                train_buffers_list.append(train_buffer)
+
+            self.network.train()
+            train_buffers = self.train_merge_buffers(train_buffers_list)
+            # 4. 全 batch 训练 PPO，用密集奖励信号训练
+            ppo_metrics = self.train_ppo_step(train_buffers)
+
+            if self.episode_count % 20 == 0 and self.episode_count != 0:
+                self.raw_buffer_list = {"states": np.array(states_arr),"actions": np.array(actions_arr),"dists": np.array(dists_arr),
+                                            "targets": np.array(targets_arr),"rewards": np.array(rewards_arr)}
+
                 alloc_metrics = self.train_allocator_step_imitation(self.raw_buffer_list)
-                # alloc_metrics = {"alloc_kl_loss" "alloc_mse_loss","alloc_kl_total_loss"，"alloc_w_rew_corr"}
-                self.raw_buffer_list = []
+                self.clear_allocator_buffer()
             else:
                 # 未到离线训练时，alloc_metrics 用默认值（metrics 构造需要）
                 alloc_metrics = {"alloc_kl_loss": 0.0, "alloc_mse_loss": 0.0,
                                  "alloc_td_loss": 0.0, "alloc_entropy_loss": 0.0,"alloc_w_rew_corr": 0.0}
 
-            # 采集 ppo_update_interval 集（全 batch 更新用）
-            train_buffers_list = []  # 存放多个 TrainingBuffer
-            total = 0.0
-            for i in range(self.config.ppo_update_interval):
-                # 1. 采集轨迹
-                raw_buffer = self.collect_trajectory()  # 里面都是List[Dict]
-                # 采集到了observation（N+1，最后一个位置为最终状态,第一个位置为初始状态）,
-                # action（N+1,第一个位置为0）,step_reward（N,密集奖励）,
-                # mean（N+1,第一个位置为0）,log_stds（N+1,第一个位置为0）,
-                # terminal_reward（标量），log_prob (N个)，value (N个)，
-                total += raw_buffer.terminal_reward
-                # 2. 奖励 = 真实密集奖励
-                allocated_rewards = np.array(raw_buffer.step_rewards)  # 转为 numpy array
-                '''
-                state(N)、action(N)、reward(N)真实的密集奖励信号、advantage(N)、return(N)、old_log_prob(N)、
-                next_state(N)、weights=[]、terminal_reward(标量)
-                '''
-                # 3. 计算 GAE 并构建训练缓冲区
-                train_buffer = self.compute_gae_and_train_buffer(raw_buffer, allocated_rewards, [],None)
-                train_buffers_list.append(train_buffer)
 
-            train_buffers = self.train_merge_buffers(train_buffers_list)
-            # 4. 全 batch 训练 PPO，用密集奖励信号训练
-            ppo_metrics = self.train_ppo_step(train_buffers)
+
 
         elif self.curriculum_level == 1:
             '''level 1：每 1 个 episode_count 采 level1_collect_episodes(200) 集构成一块（一次 PPO mini-batch 更新轮），

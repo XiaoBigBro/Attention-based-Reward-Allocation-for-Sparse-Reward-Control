@@ -193,9 +193,6 @@ class TrainingBuffer:
     advantages: List[float] = field(default_factory=list)
     returns: List[float] = field(default_factory=list)
     old_log_probs: List[float] = field(default_factory=list)
-    weights: Optional[torch.Tensor] = None# [N] tensor，分配网络权重（保留计算图）
-    weights_entropy: Optional[torch.Tensor] = None # scalar tensor，权重分布的熵（保留计算图）
-    terminal_reward: float = 0.0
 
     def __len__(self) -> int:
         return len(self.states)
