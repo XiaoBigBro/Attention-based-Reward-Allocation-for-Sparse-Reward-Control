@@ -69,10 +69,10 @@ class TrainingConfig:
     lam: float = 0.9#GAE参数
     clip_eps: float = 0.05#PPO裁剪参数,控制策略更新的稳定性.
     entropy_coef: float = 0.001  # 熵正则化系数
-    actor_lr: float = 3e-4  # 策略网络学习率
-    critic_lr: float = 1e-4  # 价值网络学习率
-    actor_lr_level2: float = 3e-5#课程学习等级2的策略网络学习率
-    critic_lr_level2: float = 1e-4#课程学习等级2的价值网络学习率
+    actor_lr0: float = 3e-4  # 策略网络学习率
+    critic_lr0: float = 1e-4  # 价值网络学习率
+    actor_lr_level1: float = 3e-5#课程学习等级2的策略网络学习率
+    critic_lr_level1: float = 1e-4#课程学习等级2的价值网络学习率
     max_grad_norm: float = 0.5  # 最大梯度范数，防止梯度爆炸
     value_clip_eps: float = 0.2  # 价值裁剪 epsilon，防止价值估计过拟合
     tau: float = 0.01  # 目标网络更新参数
@@ -168,13 +168,6 @@ class TrainingMetrics:
 class PPOTrainerWithAllocator:
     """
     PPO 训练器（集成奖励分配网络和课程学习）
-
-    训练流程:
-        1. 采集轨迹
-        2. 奖励分配
-        3. 计算 GAE
-        4. 训练 PPO + 分配网络
-        5. 更新课程学习
     """
     def __init__(self, config: TrainingConfig):
         self.config = config
@@ -192,7 +185,7 @@ class PPOTrainerWithAllocator:
         # 奖励记录文件（按种子区分）
         self.rewards_file = f"{self.save_dir}/training_rewards.txt"
         with open(self.rewards_file, 'w') as f:
-            f.write("episode,terminal_reward,curriculum_level,policy_loss,value_loss,entropy_loss,alloc_kl_total_loss,alloc_kl_loss,alloc_mse_loss,alloc_td_loss,alloc_entropy_loss,alloc_total_loss,alloc_w_rew_corr\n")
+            f.write("episode,terminal_reward,curriculum_level,policy_loss,value_loss,entropy_loss,alloc_kl_loss,alloc_mse_loss,alloc_td_loss,alloc_entropy_loss,alloc_w_rew_corr\n")
 
         # 创建设备
         self.device = torch.device(config.device)
@@ -201,7 +194,6 @@ class PPOTrainerWithAllocator:
         # 自动查询环境维度（不创建渲染窗口）
         obs_dim = get_env_obs_dim(config.env_id)
         action_dim = get_env_action_dim(config.env_id)
-        print(f"环境维度: obs={obs_dim}, action={action_dim}")
 
         print("\n[1/5] 初始化 PPO 网络...")
         self.network = PPONetwork(
@@ -213,14 +205,14 @@ class PPOTrainerWithAllocator:
             log_std_init=config.log_std_init,
         ).to(self.device)
 
-        # 优化器（策略和价值网络分开设置学习率）
+        # ppo优化器（策略和价值网络分开设置学习率）
         self.optimizer_actor = optim.Adam(
             self.network.actor.parameters(),
-            lr=config.actor_lr,
+            lr=config.actor_lr0,
         )
         self.optimizer_critic = optim.Adam(
             self.network.critic.parameters(),
-            lr=config.critic_lr,
+            lr=config.critic_lr0,
         )
 
         print("[2/5] 初始化奖励分配网络...")
@@ -282,7 +274,8 @@ class PPOTrainerWithAllocator:
         obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            action, log_prob, value, log_std, mean = self.network.get_action(obs_t)
+            action, log_prob, log_std, mean = self.network.get_action(obs_t)
+            value = get_value(obs_t)
 
         return (
             action.squeeze(0).cpu().numpy(),  # 动作（tanh 后）
@@ -1041,10 +1034,10 @@ class PPOTrainerWithAllocator:
             elif self.curriculum_level == 2:
                 # Level 2: PPO 使用较小的学习率
                 for param_group in self.optimizer_actor.param_groups:
-                    param_group['lr'] = self.config.actor_lr_level2
+                    param_group['lr'] = self.config.actor_lr_level1
                 for param_group in self.optimizer_critic.param_groups:
-                    param_group['lr'] = self.config.critic_lr_level2
-                print(f"[课程升级] Level 2: PPO lr -> actor={self.config.actor_lr_level2}, critic={self.config.critic_lr_level2}")
+                    param_group['lr'] = self.config.critic_lr_level1
+                print(f"[课程升级] Level 2: PPO lr -> actor={self.config.actor_lr_level1}, critic={self.config.critic_lr_level1}")
                 
             elif self.curriculum_level == 3:
                 # Level 3: PPO 恢复初始学习率

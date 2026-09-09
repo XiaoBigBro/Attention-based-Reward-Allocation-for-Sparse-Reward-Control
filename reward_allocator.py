@@ -6,21 +6,18 @@
     * TD 自举（Level 1+ 过渡 / Level 2）：(R_term·w + γ·V(s_{t+1}) - V(s_t))² —— 无密集时的信用分配
 """
 
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import List, Tuple
-
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from ppo import TrainingBuffer
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import List, Tuple
 
 
 # --- Positional Encoding ---
 #位置编码
-#1
 class PositionalEncoding(nn.Module):
     """
     Sinusoidal 位置编码
@@ -68,7 +65,6 @@ class FeedForward(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear2(self.dropout(F.relu(self.linear1(x))))
-
 
 # --- MultiHeadAttention ---
 #多头注意力机制
@@ -142,7 +138,6 @@ class MultiHeadAttention(nn.Module):
         context = context.view(batch_size, seq_len_q, self.d_model)
         return self.W_o(context)
 
-#1
 # --- TransformerLayer ---
 #Transformer层
 class TransformerLayer(nn.Module):
@@ -188,7 +183,7 @@ class TransformerLayer(nn.Module):
         x = self.norm2(x + self.dropout(ffn_out))
 
         return x
-#1
+
 #交叉注意力层
 class CrossAttentionLayer(nn.Module):
     """
@@ -243,7 +238,6 @@ class CrossAttentionLayer(nn.Module):
 
         return x
 
-#1
 class RewardAllocator(nn.Module):
     """基于注意力机制的奖励分配网络。
 
@@ -473,20 +467,19 @@ class RewardAllocator(nn.Module):
 
 
 # --- RewardAllocatorAgent ---
-#1
 @dataclass
 class RewardAllocatorConfig:
     """奖励分配器配置（所有参数由 TrainingConfig 集中传入）"""
-    obs_dim: int
-    action_dim: int
-    d_model: int
-    num_heads: int
-    num_layers: int
-    d_ff: int
-    dropout: float
-    entropy_coef: float
-    learning_rate: float
-    max_seq_len: int
+    obs_dim: int  # 状态观测维度
+    action_dim: int  # 动作维度
+    d_model: int  # Transformer模型隐藏层维度
+    num_heads: int  # Transformer多头注意力头数
+    num_layers: int  # Transformer层数
+    d_ff: int  # 前馈网络隐藏层维度
+    dropout: float  # Dropout比率
+    entropy_coef: float  # 熵正则化系数（用于鼓励探索）
+    learning_rate: float  # 学习率
+    max_seq_len: int  # 最大序列长度
 
 class RewardAllocatorAgent:
     """
@@ -517,9 +510,6 @@ class RewardAllocatorAgent:
             self.network.parameters(),
             lr=config.learning_rate,
         )
-
-        # 统计信息,记录训练步数
-        self.step_count = 0
 
     def allocate(
         self,
@@ -595,8 +585,6 @@ class RewardAllocatorAgent:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=0.5)
         self.optimizer.step()
-
-        self.step_count += 1
 
         return metrics
 

@@ -40,7 +40,7 @@ class Actor(nn.Module):
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
 
-    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """返回 tanh 动作、原始动作的 log_prob、log_std,采样用"""
         features = self.net(obs)
         mean = self.mean(features)
@@ -111,16 +111,17 @@ class PPONetwork(nn.Module):
         self.target_critic.load_state_dict(self.critic.state_dict())
 
     #软更新
-    def _soft_update_target(self, tau: float = 0.005):
-        for tp, p in zip(self.target_critic.parameters(), self.critic.parameters()):
-            tp.data.mul_(1.0 - tau).add_(tau * p.data)
+    def _soft_update_target(self, tau: float):
+        # 一次性更新所有参数
+        with torch.no_grad():
+            for target_param, param in zip(self.target_critic.parameters(), self.critic.parameters()):
+                target_param.copy_(tau * param + (1 - tau) * target_param)
 
     #获取动作
-    def get_action(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def get_action(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """获取动作及相关信息（tanh 压缩后）"""
-        action, log_prob, log_std , mean= self.actor(obs)
-        value = self.critic(obs)
-        return action, log_prob, value, log_std, mean
+        action, log_prob, log_std, mean= self.actor(obs)
+        return action, log_prob, log_std, mean
 
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
         return self.critic(obs)
