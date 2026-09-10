@@ -88,6 +88,7 @@ class TrainingConfig:
     ppo_epochs: int = 4 #每批数据训练多少次
     ppo_update_interval: int = 50 #收集多少回合再进行训练（Level 0 / 兜底分支用：每回合采 5 集后全 batch 更新一次）
     critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
+    mini_batch_size = 1024
 
     # 奖励分配网络超参数
     alloc_d_model: int = 64#奖励分配网络隐藏层维度
@@ -151,11 +152,9 @@ class TrainingMetrics:
     # 分配网络损失
     alloc_td_loss: float = 0.0#分配网络TD损失
     alloc_entropy_loss: float = 0.0#分配网络熵正则化损失
-    alloc_total_loss: float = 0.0#分配网络总损失
     alloc_kl_loss: float = 0.0#分配网络KL损失
     alloc_mse_loss: float = 0.0#分配网络MSE损失
     alloc_w_rew_corr: float = 0.0  # 分配网络输出权重与密集奖励的相关性（诊断：是否学会"高奖励步权重高"）
-
 
     # 课程学习状态
     curriculum_level: int = 0#课程学习等级
@@ -276,7 +275,7 @@ class PPOTrainerWithAllocator:
 
         with torch.no_grad():
             action, log_prob, log_std, mean = self.network.get_action(obs_t)
-            value = get_value(obs_t)
+            value = self.network.get_value(obs_t)
 
         return (
             action.squeeze(0).cpu().numpy(),  # 动作（tanh 后）
@@ -301,9 +300,6 @@ class PPOTrainerWithAllocator:
             merged.advantages.extend(buf.advantages)
             merged.returns.extend(buf.returns)
             merged.old_log_probs.extend(buf.old_log_probs)
-
-        merged.next_states = []  # 训练不需要
-        merged.rewards = []  # 训练不需要
 
         return merged
 
@@ -381,6 +377,7 @@ class PPOTrainerWithAllocator:
         """计算 GAE 并构建训练缓冲区"""
         # 实际 transition 数 N (observations 有 N+1 个，包含 terminal state)
         N = len(buffer.observations) - 1#长度为N
+        allocated_rewards_list = allocated_rewards.tolist()
 
         observations = buffer.observations  # 长度 N+1: s_0, ..., s_N
 
@@ -396,7 +393,7 @@ class PPOTrainerWithAllocator:
 
         # 计算 GAE（所有输入长度必须一致为 N）
         advantages, returns = compute_gae(
-            allocated_rewards.tolist(),  # 长度 N
+            allocated_rewards_list,  # 长度 N
             values,  # 长度 N
             next_values,  # 长度 N
             dones,  # 长度 N
@@ -408,21 +405,10 @@ class PPOTrainerWithAllocator:
         train_buffer = TrainingBuffer()
 
         train_buffer.states = observations[:N]  # s_0...s_{N-1}
-        train_buffer.actions = actions[1:N + 1]  # a_0...a_{N-1}（已偏移）
-        train_buffer.rewards = allocated_rewards.tolist()  # 转为 list（因为字段是 List[float]）
+        train_buffer.actions = buffer.actions[1:N + 1]  # a_0...a_{N-1}（已偏移）
         train_buffer.advantages = advantages[:N]  # 长度 N
         train_buffer.returns = returns[:N]  # 长度 N
-        train_buffer.old_log_probs = log_probs[:N]  # 长度 N
-        train_buffer.next_states = observations[1:N + 1]  # s_1...s_N
-
-        # for i in range(N):
-        #     train_buffer.states.append(observations[i])  # s_i
-        #     train_buffer.actions.append(buffer.actions[i + 1])  # a_i (shifted)
-        #     train_buffer.rewards.append(allocated_rewards[i])  # r_i
-        #     train_buffer.advantages.append(advantages[i])
-        #     train_buffer.returns.append(returns[i])
-        #     train_buffer.old_log_probs.append(buffer.log_probs[i])  # log π(a_i|s_i)
-        #     train_buffer.next_states.append(observations[i + 1])  # s_{i+1}
+        train_buffer.old_log_probs = buffer.log_probs[:N]  # 长度 N
 
         return train_buffer
 
@@ -457,23 +443,38 @@ class PPOTrainerWithAllocator:
         total_entropy_loss = 0.0
         total_critic_updates = 0
 
+        n = states.size(0)
+
+        # 价值裁剪参考值：本次 update 开始前用当前 critic 对全部状态算一次，整个 update 固定
+        with torch.no_grad():
+            old_values = self.network.get_value(states).squeeze(-1).detach()
+
         # 策略网络更新 ppo_epochs 次，价值网络更新 critic_updates_per_epoch * ppo_epochs 次
         for epoch in range(self.config.ppo_epochs):
+
+            perm = torch.randperm(n, device=self.device)
+            for start in range(0, n, self.config.mini_batch_size):
+                idx = perm[start:start + self.config.mini_batch_size]
+                s_b, a_b = states[idx], actions[idx]
+                old_lp_b = old_log_probs[idx]
+                adv_b = advantages[idx]
+                ret_b = returns[idx]
+
             # ========== Actor 更新 ==========
             self.optimizer_actor.zero_grad()
             # 使用新的 get_log_prob 方法（包含 tanh 修正）
-            new_log_probs = self.network.actor.get_log_prob(states, actions)
+            new_log_probs = self.network.actor.get_log_prob(s_b, a_b)
 
             # 计算对角高斯策略的熵（基于 log_std，不依赖具体采样动作）
             # 公式: H = 0.5 * Σ(ln(2πσ²) + 1) = Σ(0.5*(ln(2π)+1) + ln(σ))
             log_std = torch.clamp(self.network.actor.log_std, self.config.log_std_min, self.config.log_std_max)
             entropy = (0.5 * (1.0 + np.log(2.0 * np.pi)) + log_std).sum()
 
-            ratio = torch.exp(new_log_probs - old_log_probs)
+            ratio = torch.exp(new_log_probs - old_lp_b)
             # 限制极端比值，防止单次更新破坏策略
             ratio = torch.clamp(ratio, 0.01, 5.0)
-            surr1 = ratio * advantages
-            surr2 = torch.clamp(ratio, 1 - self.config.clip_eps, 1 + self.config.clip_eps) * advantages
+            surr1 = ratio * adv_b
+            surr2 = torch.clamp(ratio, 1 - self.config.clip_eps, 1 + self.config.clip_eps) * adv_b
             policy_loss = -torch.min(surr1, surr2).mean()
             entropy_loss = -current_entropy_coef * entropy  # 熵损失
             actor_loss = policy_loss + entropy_loss
@@ -484,22 +485,18 @@ class PPOTrainerWithAllocator:
 
             # ========== Critic 更新（多次） ==========
             # 价值裁剪：只对第一个 epoch 保存 old_values（用于裁剪参考）
-            if epoch == 0:
-                with torch.no_grad():
-                    old_values = self.network.get_value(states).squeeze(-1).detach()
-
             for _ in range(self.config.critic_updates_per_epoch):
                 self.optimizer_critic.zero_grad()
-                values = self.network.get_value(states).squeeze(-1)
+                values = self.network.get_value(s_b).squeeze(-1)
                 # 价值裁剪：限制 value 不能偏离 old_value 太远
                 values_clipped = torch.clamp(
                     values,
-                    old_values - self.config.value_clip_eps,
-                    old_values + self.config.value_clip_eps,
+                    old_values[idx] - self.config.value_clip_eps,
+                    old_values[idx] + self.config.value_clip_eps
                 )
                 # 使用裁剪后的价值计算损失（取较大的损失）
-                value_loss_unclipped = F.smooth_l1_loss(values, returns)
-                value_loss_clipped = F.smooth_l1_loss(values_clipped, returns)
+                value_loss_unclipped = F.smooth_l1_loss(values, ret_b)
+                value_loss_clipped = F.smooth_l1_loss(values_clipped, ret_b)
                 value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
                 value_loss.backward()
                 nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.config.max_grad_norm)
@@ -521,109 +518,6 @@ class PPOTrainerWithAllocator:
             "entropy_loss": total_entropy_loss / n,
         }
 
-    def train_ppo_step_minibatch(self, train_buffer: TrainingBuffer,
-                                 mini_batch_size: int) -> Dict[str, float]:
-        """训练 PPO 网络（mini-batch 打乱更新）：仅供 Level 1 块式训练使用。
-
-        与 train_ppo_step（全 batch）的区别：
-          - 把整块 transitions 随机打乱（每 epoch 重新打乱一次），
-            按 mini_batch_size 分成多个小批；
-          - 每小批做 1 次 actor 更新 + 1 次 critic 更新；
-          - 一个块的总更新次数 ≈ ceil(N / mini_batch_size) × ppo_epochs。
-
-        价值裁剪参考值：本次 update 开始时用当前 critic 对全 batch 算一次、
-        整个 update 全程固定（标准 PPO 做法，与全 batch 版 epoch==0 算一次等价）。
-
-        参数:
-          train_buffer:  一块（level1_collect_episodes 集）merge 后的 TrainingBuffer
-          mini_batch_size: 每小批的时间步数（如 512）
-
-        返回: policy_loss / value_loss / entropy_loss（按实际梯度更新次数平均，
-        与 train_ppo_step 返回口径一致）
-        """
-
-        # 获取当前的熵系数
-        current_entropy_coef = self.get_entropy_coef()
-
-        # 转为 tensor
-        states = torch.FloatTensor(np.array(train_buffer.states)).to(self.device)
-        actions = torch.FloatTensor(np.array(train_buffer.actions)).to(self.device)
-        old_log_probs = torch.FloatTensor(train_buffer.old_log_probs).to(self.device)
-        advantages = torch.FloatTensor(train_buffer.advantages).to(self.device)
-        returns = torch.FloatTensor(train_buffer.returns).to(self.device)
-
-        # 标准化优势
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-
-        n = states.size(0)
-
-        # 价值裁剪参考值：本次 update 开始前用当前 critic 对全部状态算一次，整个 update 固定
-        with torch.no_grad():
-            old_values = self.network.get_value(states).squeeze(-1).detach()
-
-        # 累计损失（按实际梯度更新次数平均）
-        total_policy_loss = 0.0
-        total_value_loss = 0.0
-        total_entropy_loss = 0.0
-        n_actor_updates = 0
-        n_critic_updates = 0
-
-        # 每 epoch 打乱一次，按 mini_batch_size 分批更新
-        for epoch in range(self.config.ppo_epochs):
-            perm = torch.randperm(n, device=self.device)
-            for start in range(0, n, mini_batch_size):
-                idx = perm[start:start + mini_batch_size]
-                s_b, a_b = states[idx], actions[idx]
-                old_lp_b = old_log_probs[idx]
-                adv_b = advantages[idx]
-                ret_b = returns[idx]
-
-                # --- Actor 更新（每小批 1 次） ---
-                self.optimizer_actor.zero_grad()
-                new_log_probs = self.network.actor.get_log_prob(s_b, a_b)
-                log_std = torch.clamp(self.network.actor.log_std,
-                                      self.config.log_std_min, self.config.log_std_max)
-                entropy = (0.5 * (1.0 + np.log(2.0 * np.pi)) + log_std).sum()
-                ratio = torch.exp(new_log_probs - old_lp_b)
-                ratio = torch.clamp(ratio, 0.01, 5.0)
-                surr1 = ratio * adv_b
-                surr2 = torch.clamp(ratio, 1 - self.config.clip_eps,
-                                    1 + self.config.clip_eps) * adv_b
-                policy_loss = -torch.min(surr1, surr2).mean()
-                entropy_loss = -current_entropy_coef * entropy
-                actor_loss = policy_loss + entropy_loss
-                actor_loss.backward()
-                nn.utils.clip_grad_norm_(self.network.actor.parameters(), self.config.max_grad_norm)
-                self.optimizer_actor.step()
-
-                # --- Critic 更新（每小批 1 次，clip 参考 old_values[idx]） ---
-                self.optimizer_critic.zero_grad()
-                values = self.network.get_value(s_b).squeeze(-1)
-                values_clipped = torch.clamp(values,
-                                             old_values[idx] - self.config.value_clip_eps,
-                                             old_values[idx] + self.config.value_clip_eps)
-                value_loss_unclipped = F.smooth_l1_loss(values, ret_b)
-                value_loss_clipped = F.smooth_l1_loss(values_clipped, ret_b)
-                value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
-                value_loss.backward()
-                nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.config.max_grad_norm)
-                self.optimizer_critic.step()
-
-                total_policy_loss += policy_loss.item()
-                total_entropy_loss += entropy_loss.item()
-                total_value_loss += value_loss.item()
-                n_actor_updates += 1
-                n_critic_updates += 1
-
-        # 软更新 target_critic
-        self.network._soft_update_target(self.config.tau)
-
-        return {
-            "policy_loss": total_policy_loss / max(n_actor_updates, 1),
-            "value_loss": total_value_loss / max(n_critic_updates, 1),
-            "entropy_loss": total_entropy_loss / max(n_actor_updates, 1),
-        }
-
     def clear_allocator_buffer(self):
 
         self.raw_buffer_list = []
@@ -634,19 +528,8 @@ class PPOTrainerWithAllocator:
         self.rewards_arr = []
 
     def train_allocator_step_imitation(self, dataset) -> Dict[str, float]:
-        """训练奖励分配网络（模仿训练）：批量 mini-batch 流程（离线）
-
-        输入: collect_allocator_dataset 的产物 dict（states/actions/dists/targets/rewards，
-        已预处理，直接送分配网络，无需再预处理）。
-
-        流程:
-          1. 打乱回合顺序，按 imitation_batch_episodes(20) 回合/批划分
-          2. 每批: 20 回合拼成 [B, 80, ...] 一起 forward，
-             loss = MSE(logits_c, log_target_c) + 0.1*KL，一次梯度更新
-          3. 重复 imitation_epochs(50) 个 epoch，每个 epoch 重新打乱、重新分批
-          4. 训练后对全体回合计算权重-奖励相关性 corr（诊断是否学会"高奖励步权重高"）
-
-        返回各指标均值（数据集为空时返回全 0）。
+        """
+        训练奖励分配网络（模仿训练）：批量 mini-batch 流程（离线）
         """
         S = dataset["states"]      # [N, 80, 2*obs]
         A = dataset["actions"]     # [N, 80, act]
@@ -658,8 +541,14 @@ class PPOTrainerWithAllocator:
         device = self.device
         batch = self.config.imitation_batch_episodes
         n_batch = (n_eps + batch - 1) // batch
-        print(f"[模仿训练] {n_eps} 回合, {batch}/批, {n_batch} 批/epoch, "
-              f"{self.config.imitation_epochs} epoch = {n_batch * self.config.imitation_epochs} 梯度步")
+
+        # ---------- 一次性把训练数据搬到 GPU ----------
+        # 使用 from_numpy 避免多余拷贝，再转 float32 并送到 device
+        S_gpu = torch.from_numpy(S).float().to(device)  # [N, 80, 2*obs]
+        A_gpu = torch.from_numpy(A).float().to(device)  # [N, 80, act]
+        D_gpu = torch.from_numpy(D).float().to(device)  # [N, 80, 2*act]
+        T_gpu = torch.from_numpy(T).float().to(device)  # [N, 80]
+
 
         # ---------- 2~4. 多 epoch mini-batch 训练 ----------
         total_kl, total_mse, total_steps = 0.0, 0.0, 0
@@ -668,11 +557,14 @@ class PPOTrainerWithAllocator:
             order = np.random.permutation(n_eps)  # 每 epoch 重新打乱
 
             for start in range(0, n_eps, batch):
+
                 idx = order[start:start + batch]
-                s = torch.FloatTensor(S[idx]).to(device)      # [B, 80, 2*obs]
-                a = torch.FloatTensor(A[idx]).to(device)      # [B, 80, act]
-                d = torch.FloatTensor(D[idx]).to(device)      # [B, 80, 2*act]
-                t = torch.FloatTensor(T[idx]).to(device)      # [B, 80]
+                idx_gpu = torch.from_numpy(idx).long().to(device)
+
+                s = S_gpu[idx_gpu]  # [B, 80, 2*obs]
+                a = A_gpu[idx_gpu]  # [B, 80, act]
+                d = D_gpu[idx_gpu]  # [B, 80, 2*act]
+                t = T_gpu[idx_gpu]  # [B, 80]
 
                 logits, w, _ = self.allocator_agent.network(s, a, d)  # [B, 80]
 
@@ -710,10 +602,8 @@ class PPOTrainerWithAllocator:
         return {
             "alloc_kl_loss": total_kl / max(total_steps, 1),
             "alloc_mse_loss": total_mse / max(total_steps, 1),
-            "alloc_kl_total_loss": (total_kl + total_mse) / max(total_steps, 1),
             "alloc_td_loss": 0.0,
             "alloc_entropy_loss": 0.0,
-            "alloc_total_loss": 0.0,
             "alloc_w_rew_corr": w_rew_corr,
         }
 
@@ -846,6 +736,7 @@ class PPOTrainerWithAllocator:
             train_buffers_list = []  # 存放多个 TrainingBuffer
             total = 0.0
             self.network.eval()
+
             for i in range(self.config.ppo_update_interval):
 
                 # 1. 采集轨迹
@@ -865,17 +756,17 @@ class PPOTrainerWithAllocator:
                 self.rewards_arr.append(dense_rewards)
 
                 # 3. 计算 GAE 并构建训练缓冲区
-                train_buffer = self.compute_gae_and_train_buffer(raw_buffer, dense_rewards )
+                train_buffer = self.compute_gae_and_train_buffer(raw_buffer, dense_rewards)
                 train_buffers_list.append(train_buffer)
 
             self.network.train()
             train_buffers = self.train_merge_buffers(train_buffers_list)
-            # 4. 全 batch 训练 PPO，用密集奖励信号训练
+            # 4. batch 训练 PPO，用密集奖励信号训练
             ppo_metrics = self.train_ppo_step(train_buffers)
 
             if self.episode_count % 20 == 0 and self.episode_count != 0:
-                self.raw_buffer_list = {"states": np.array(states_arr),"actions": np.array(actions_arr),"dists": np.array(dists_arr),
-                                            "targets": np.array(targets_arr),"rewards": np.array(rewards_arr)}
+                self.raw_buffer_list = {"states": np.array(self.states_arr),"actions": np.array(self.actions_arr),"dists": np.array(self.dists_arr),
+                                            "targets": np.array(self.targets_arr),"rewards": np.array(self.rewards_arr)}
 
                 alloc_metrics = self.train_allocator_step_imitation(self.raw_buffer_list)
                 self.clear_allocator_buffer()
@@ -883,9 +774,6 @@ class PPOTrainerWithAllocator:
                 # 未到离线训练时，alloc_metrics 用默认值（metrics 构造需要）
                 alloc_metrics = {"alloc_kl_loss": 0.0, "alloc_mse_loss": 0.0,
                                  "alloc_td_loss": 0.0, "alloc_entropy_loss": 0.0,"alloc_w_rew_corr": 0.0}
-
-
-
 
         elif self.curriculum_level == 1:
             '''level 1：每 1 个 episode_count 采 level1_collect_episodes(200) 集构成一块（一次 PPO mini-batch 更新轮），
@@ -970,8 +858,8 @@ class PPOTrainerWithAllocator:
             ppo_metrics = self.train_ppo_step(train_buffers)
 
             # allocator 训练占位
-            alloc_metrics = {"alloc_kl_loss": 0.0, "alloc_mse_loss": 0.0, "alloc_kl_total_loss": 0.0,
-                             "alloc_td_loss": 0.0, "alloc_entropy_loss": 0.0, "alloc_total_loss": 0.0,
+            alloc_metrics = {"alloc_kl_loss": 0.0, "alloc_mse_loss": 0.0,
+                             "alloc_td_loss": 0.0, "alloc_entropy_loss": 0.0,
                              "alloc_w_rew_corr": 0.0}
 
         # 更新课程学习
@@ -1031,10 +919,9 @@ class PPOTrainerWithAllocator:
         with open(self.rewards_file, 'a') as f:
             f.write(f"{self.episode_count},{terminal_reward},{self.curriculum_level},"
                     f"{metrics.policy_loss:.6f},{metrics.value_loss:.6f},"
-                    f"{metrics.entropy_loss:.6f},{metrics.alloc_kl_total_loss:.6f},"
-                    f"{metrics.alloc_kl_loss:.6f},{metrics.alloc_mse_loss:.6f},"
-                    f"{metrics.alloc_td_loss:.6f},{metrics.alloc_entropy_loss:.6f},"
-                    f"{metrics.alloc_total_loss:.6f},{metrics.alloc_w_rew_corr:.6f}\n")
+                    f"{metrics.entropy_loss:.6f},{metrics.alloc_kl_loss:.6f},"
+                    f"{metrics.alloc_mse_loss:.6f},{metrics.alloc_td_loss:.6f}"
+                    f"{metrics.alloc_entropy_loss:.6f},{metrics.alloc_w_rew_corr:.6f}\n")
 
         return metrics
 
@@ -1060,13 +947,13 @@ class PPOTrainerWithAllocator:
             terminal_rewards.append(metrics.terminal_reward)
 
             # 日志
-            if self.episode_count % self.config.log_interval == 0:
+            if self.episode_count % self.config.log_interval == 0 and self.episode_count != 0:
                 avg_reward = np.mean(terminal_rewards[-self.config.log_interval:])
                 current_level = self.curriculum_manager.get_current_level()
-                window_mean = self.curriculum_manager.reward_window.mean() if self.curriculum_manager.reward_window.count() > 0 else 0.0
+                window_mean = self.curriculum_manager.reward_window.mean()
                 current_entropy_coef = self.get_entropy_coef()
 
-                log_std_mean = self.network.actor.log_std.mean().item()
+                log_std_mean = metrics.log_std
 
                 pbar.write(f"[Episode {self.episode_count}]")
                 pbar.write(f"  课程等级: {current_level}")
@@ -1078,10 +965,8 @@ class PPOTrainerWithAllocator:
                 pbar.write(f"  Actor熵损失: {metrics.entropy_loss:.4f}")
                 pbar.write(f"  分配网络td损失: {metrics.alloc_td_loss:.4f}")
                 pbar.write(f"  分配网络熵损失: {metrics.alloc_entropy_loss:.4f}")
-                pbar.write(f"  分配网络总损失: {metrics.alloc_total_loss:.4f}")
                 pbar.write(f"  分配网络kl损失: {metrics.alloc_kl_loss:.4f}")
                 pbar.write(f"  分配网络mes损失: {metrics.alloc_mse_loss:.4f}")
-                pbar.write(f"  分配网络模仿训练总损失: {metrics.alloc_kl_total_loss:.4f}")
                 pbar.write(f"  分配网络权重-奖励相关: {metrics.alloc_w_rew_corr:.3f}")
 
             self.episode_count += 1
@@ -1093,11 +978,11 @@ class PPOTrainerWithAllocator:
                 "TR": f"{metrics.terminal_reward:.1f}",
             })
 
-            # 课程升级时保存
-            if metrics.curriculum_changed == "promote":
-                save_path = f"{self.save_dir}/level_up_{self.episode_count}.pt"
-                self.save(save_path)
-                pbar.write(f"*** 课程升级! 模型已保存: {save_path} ***")
+            # # 课程升级时保存
+            # if metrics.curriculum_changed == "promote":
+            #     save_path = f"{self.save_dir}/level_up_{self.episode_count}.pt"
+            #     self.save(save_path)
+            #     pbar.write(f"*** 课程升级! 模型已保存: {save_path} ***")
 
             # 定时保存
             if self.episode_count % self.config.save_interval == 0:
