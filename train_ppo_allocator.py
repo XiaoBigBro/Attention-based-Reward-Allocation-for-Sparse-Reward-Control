@@ -442,6 +442,8 @@ class PPOTrainerWithAllocator:
         total_value_loss = 0.0
         total_entropy_loss = 0.0
         total_critic_updates = 0
+        total_policy_updates = 0
+        total_entropy_updates = 0
 
         n = states.size(0)
 
@@ -454,68 +456,70 @@ class PPOTrainerWithAllocator:
 
             perm = torch.randperm(n, device=self.device)
             for start in range(0, n, self.config.mini_batch_size):
+
                 idx = perm[start:start + self.config.mini_batch_size]
                 s_b, a_b = states[idx], actions[idx]
                 old_lp_b = old_log_probs[idx]
                 adv_b = advantages[idx]
                 ret_b = returns[idx]
 
-            # ========== Actor 更新 ==========
-            self.optimizer_actor.zero_grad()
-            # 使用新的 get_log_prob 方法（包含 tanh 修正）
-            new_log_probs = self.network.actor.get_log_prob(s_b, a_b)
+                # ========== Actor 更新 ==========
+                self.optimizer_actor.zero_grad()
+                # 使用新的 get_log_prob 方法（包含 tanh 修正）
+                new_log_probs = self.network.actor.get_log_prob(s_b, a_b)
 
-            # 计算对角高斯策略的熵（基于 log_std，不依赖具体采样动作）
-            # 公式: H = 0.5 * Σ(ln(2πσ²) + 1) = Σ(0.5*(ln(2π)+1) + ln(σ))
-            log_std = torch.clamp(self.network.actor.log_std, self.config.log_std_min, self.config.log_std_max)
-            entropy = (0.5 * (1.0 + np.log(2.0 * np.pi)) + log_std).sum()
+                # 计算对角高斯策略的熵（基于 log_std，不依赖具体采样动作）
+                # 公式: H = 0.5 * Σ(ln(2πσ²) + 1) = Σ(0.5*(ln(2π)+1) + ln(σ))
+                log_std = torch.clamp(self.network.actor.log_std, self.config.log_std_min, self.config.log_std_max)
+                entropy = (0.5 * (1.0 + np.log(2.0 * np.pi)) + log_std).sum()
 
-            ratio = torch.exp(new_log_probs - old_lp_b)
-            # 限制极端比值，防止单次更新破坏策略
-            ratio = torch.clamp(ratio, 0.01, 5.0)
-            surr1 = ratio * adv_b
-            surr2 = torch.clamp(ratio, 1 - self.config.clip_eps, 1 + self.config.clip_eps) * adv_b
-            policy_loss = -torch.min(surr1, surr2).mean()
-            entropy_loss = -current_entropy_coef * entropy  # 熵损失
-            actor_loss = policy_loss + entropy_loss
+                ratio = torch.exp(new_log_probs - old_lp_b)
+                # 限制极端比值，防止单次更新破坏策略
+                ratio = torch.clamp(ratio, 0.01, 5.0)
+                surr1 = ratio * adv_b
+                surr2 = torch.clamp(ratio, 1 - self.config.clip_eps, 1 + self.config.clip_eps) * adv_b
+                policy_loss = -torch.min(surr1, surr2).mean()
+                entropy_loss = -current_entropy_coef * entropy  # 熵损失
+                actor_loss = policy_loss + entropy_loss
 
-            actor_loss.backward()
-            nn.utils.clip_grad_norm_(self.network.actor.parameters(), self.config.max_grad_norm)
-            self.optimizer_actor.step()
+                actor_loss.backward()
+                nn.utils.clip_grad_norm_(self.network.actor.parameters(), self.config.max_grad_norm)
+                self.optimizer_actor.step()
 
-            # ========== Critic 更新（多次） ==========
-            # 价值裁剪：只对第一个 epoch 保存 old_values（用于裁剪参考）
-            for _ in range(self.config.critic_updates_per_epoch):
-                self.optimizer_critic.zero_grad()
-                values = self.network.get_value(s_b).squeeze(-1)
-                # 价值裁剪：限制 value 不能偏离 old_value 太远
-                values_clipped = torch.clamp(
-                    values,
-                    old_values[idx] - self.config.value_clip_eps,
-                    old_values[idx] + self.config.value_clip_eps
-                )
-                # 使用裁剪后的价值计算损失（取较大的损失）
-                value_loss_unclipped = F.smooth_l1_loss(values, ret_b)
-                value_loss_clipped = F.smooth_l1_loss(values_clipped, ret_b)
-                value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
-                value_loss.backward()
-                nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.config.max_grad_norm)
-                self.optimizer_critic.step()
+                # ========== Critic 更新（多次） ==========
+                # 价值裁剪：只对第一个 epoch 保存 old_values（用于裁剪参考）
+                for _ in range(self.config.critic_updates_per_epoch):
+                    self.optimizer_critic.zero_grad()
+                    values = self.network.get_value(s_b).squeeze(-1)
+                    # 价值裁剪：限制 value 不能偏离 old_value 太远
+                    values_clipped = torch.clamp(
+                        values,
+                        old_values[idx] - self.config.value_clip_eps,
+                        old_values[idx] + self.config.value_clip_eps
+                    )
+                    # 使用裁剪后的价值计算损失（取较大的损失）
+                    value_loss_unclipped = F.smooth_l1_loss(values, ret_b)
+                    value_loss_clipped = F.smooth_l1_loss(values_clipped, ret_b)
+                    value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
+                    value_loss.backward()
+                    nn.utils.clip_grad_norm_(self.network.critic.parameters(), self.config.max_grad_norm)
+                    self.optimizer_critic.step()
 
-                total_value_loss += value_loss.item()
-                total_critic_updates += 1
+                    total_value_loss += value_loss.item()
+                    total_critic_updates += 1
 
-            total_policy_loss += policy_loss.item()
-            total_entropy_loss += entropy_loss.item()
+                total_policy_loss += policy_loss.item()
+                total_entropy_loss += entropy_loss.item()
+                total_policy_updates += 1
+                total_entropy_updates += 1
 
         # 软更新 target_critic
         self.network._soft_update_target(self.config.tau)
 
-        n = self.config.ppo_epochs
         return {
-            "policy_loss": total_policy_loss / n,
+            "policy_loss": total_policy_loss / total_policy_updates,
             "value_loss": total_value_loss / total_critic_updates,
-            "entropy_loss": total_entropy_loss / n,
+            "entropy_loss": total_entropy_loss / total_entropy_updates,
         }
 
     def clear_allocator_buffer(self):
@@ -776,19 +780,6 @@ class PPOTrainerWithAllocator:
                                  "alloc_td_loss": 0.0, "alloc_entropy_loss": 0.0,"alloc_w_rew_corr": 0.0}
 
         elif self.curriculum_level == 1:
-            '''level 1：每 1 个 episode_count 采 level1_collect_episodes(200) 集构成一块（一次 PPO mini-batch 更新轮），
-            奖励从"纯密集"逐步过渡到"纯分配网络奖励"（Level 2 形态）。
-            每步奖励:  r_ppo(t) = (1-α)·r_dense(t) + α·R_term·w(t)
-                       r_dense(t)=环境真实密集奖励；w(t)=分配网络对当前轨迹事后输出的权重（Σw=1）
-            守恒性质:  Σ r_dense = Σ R_term·w = R_term → Σ r_ppo 恒 = R_term，GAE/critic 尺度不随 α 变。
-            α 调度:    α 在【块首（采集前）】算一次、整块固定；
-                       按 level1 内真实集数（level_episode_counts[level1] × level1_collect_episodes）/ curriculum_promote_cooldown 线性 0→1；
-                       超过 promote_cooldown 后 α 恒为 1 → 整块纯分配网络奖励。
-            训练:      采满一块后 PPO 把块内全部 transitions 打乱，按 level1_mini_batch_size(512) 分批，
-                       扫 ppo_epochs(4) 遍（每批 actor+critic 各一次）——见 train_ppo_step_minibatch。
-            课程:      同 Level 0 语义——每 1 个 episode_count（本分支即一块）结束时对块末那集 on_episode_end 计入一次。
-            说明:      每集 allocator eval 前向拿 w（禁 dropout，用后恢复 train）只用于混合奖励；
-                       allocator 自身训练：块末用本块轨迹批量训练（模仿锚 + TD 自举），见 train_allocator_step_level1。'''
 
             # 块首：α 在采集前算好，整块固定（真实集数 = 本 level 已完成块数 × 每块集数）
             n_real_in_level = (self.curriculum_manager.level_episode_counts[self.curriculum_level]
@@ -974,7 +965,6 @@ class PPOTrainerWithAllocator:
             # 更新进度条
             pbar.update(1)
             pbar.set_postfix({
-                "Level": metrics.curriculum_level,
                 "TR": f"{metrics.terminal_reward:.1f}",
             })
 
@@ -1014,7 +1004,6 @@ class PPOTrainerWithAllocator:
                 "since_last_change": self.curriculum_manager.since_last_change,
                 "reward_buffer": list(self.curriculum_manager.reward_window._buffer),
                 "level_episode_counts": dict(self.curriculum_manager.level_episode_counts),
-                "event_history": self.curriculum_manager.event_history,
             },
             "config": self.config,
             "episode_count": self.episode_count,
@@ -1040,7 +1029,6 @@ class PPOTrainerWithAllocator:
             maxlen=self.curriculum_manager.reward_window.window_size,
         )
         self.curriculum_manager.level_episode_counts = cs["level_episode_counts"]
-        self.curriculum_manager.event_history = list(cs["event_history"])
 
 # ============================================================================
 # 3. 随机数种子设置
@@ -1110,7 +1098,6 @@ def main():
 
     # 开始训练
     trainer.train()
-
 
 if __name__ == "__main__":
     main()
