@@ -71,8 +71,12 @@ class TrainingConfig:
     entropy_coef: float = 0.001  # 熵正则化系数
     actor_lr0: float = 3e-4  # 策略网络学习率
     critic_lr0: float = 1e-4  # 价值网络学习率
-    actor_lr_level1: float = 3e-5#课程学习等级2的策略网络学习率
-    critic_lr_level1: float = 1e-4#课程学习等级2的价值网络学习率
+    actor_lr1: float = 3e-5#课程学习等级1的策略网络学习率
+    critic_lr1: float = 1e-4#课程学习等级1的价值网络学习率
+    actor_lr2: float = 3e-5  # 课程学习等级2的策略网络学习率
+    critic_lr2: float = 1e-4  # 课程学习等级2的价值网络学习率
+    actor_lr3: float = 3e-5  # 课程学习等级3的策略网络学习率
+    critic_lr3: float = 1e-4  # 课程学习等级3的价值网络学习率
     max_grad_norm: float = 0.5  # 最大梯度范数，防止梯度爆炸
     value_clip_eps: float = 0.2  # 价值裁剪 epsilon，防止价值估计过拟合
     tau: float = 0.01  # 目标网络更新参数
@@ -115,12 +119,11 @@ class TrainingConfig:
     level1_alloc_batch_episodes: int = 16  # 每批回合数（batch 维 = 回合）
     level1_alloc_max_beta: float = 0.9  # β 上限（α=1 时仍留 0.1 模仿锚，防纯 TD 自举崩）
 
-
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
     curriculum_promote_threshold: float = 50.0#课程学习提升阈值
     curriculum_demote_threshold: float = 10.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 10#课程学习提升冷却期
+    curriculum_promote_cooldown: int = 50#课程学习提升冷却期
     curriculum_demote_cooldown: int = 50#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
