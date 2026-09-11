@@ -99,13 +99,13 @@ class TrainingConfig:
     max_seq_len: int = 100#奖励分配网络最大序列长度
 
     # 分配网络level0模仿训练参数
-    temperature: float = 0.5#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）。
+    temperature: float = 0.7#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）。
     # 0.1 会 softmax 塌缩成 one-hot（权重全给最高奖励步，推进步信号消失）；
     # 0.5 时 target 为"保持>推进>后退"（约 148:20:2.7），可学且梯度足够强（比 1.0 强约 10 倍）；
     # 1.0 时 target 太平坦（7.4:2.8:1），梯度被 80 维归一化稀释到 1e-5 量级，500 集也推不动。
-    imitation_lr: float = 3e-4#模仿训练学习率
-    imitation_batch_episodes: int = 16#模仿训练每批回合数（batch 维=回合，一次梯度更新）
-    imitation_epochs: int = 5#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
+    imitation_lr: float = 1e-3#模仿训练学习率
+    imitation_batch_episodes: int = 128#模仿训练每批回合数（batch 维=回合，一次梯度更新）
+    imitation_epochs: int = 10#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
     imitation_dataset_size: int = 1000#离线训练数据集大小（每 100 次训练时用当前 PPO 现采 N 回合组成固定数据集）
 
     #奖励分配网络level1训练参数
@@ -768,7 +768,7 @@ class PPOTrainerWithAllocator:
             # 4. batch 训练 PPO，用密集奖励信号训练
             ppo_metrics = self.train_ppo_step(train_buffers)
 
-            if self.episode_count % 20 == 0 and self.episode_count != 0:
+            if self.episode_count % (self.config.imitation_dataset_size // self.config.ppo_update_interval) == 0 and self.episode_count != 0:
                 self.raw_buffer_list = {"states": np.array(self.states_arr),"actions": np.array(self.actions_arr),"dists": np.array(self.dists_arr),
                                             "targets": np.array(self.targets_arr),"rewards": np.array(self.rewards_arr)}
 
