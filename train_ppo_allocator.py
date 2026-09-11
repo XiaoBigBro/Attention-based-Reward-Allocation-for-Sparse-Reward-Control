@@ -118,9 +118,9 @@ class TrainingConfig:
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
-    curriculum_promote_threshold: float = 150.0#课程学习提升阈值
+    curriculum_promote_threshold: float = 50.0#课程学习提升阈值
     curriculum_demote_threshold: float = 10.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 200#课程学习提升冷却期
+    curriculum_promote_cooldown: int = 10#课程学习提升冷却期
     curriculum_demote_cooldown: int = 50#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
@@ -866,32 +866,32 @@ class PPOTrainerWithAllocator:
             if self.curriculum_level == 0:
                 self.allocator_agent.update_learning_rate(self.config.imitation_lr)
                 for param_group in self.optimizer_actor.param_groups:
-                    param_group['lr'] = self.config.actor_lr
+                    param_group['lr'] = self.config.actor_lr0
                 for param_group in self.optimizer_critic.param_groups:
-                    param_group['lr'] = self.config.critic_lr
+                    param_group['lr'] = self.config.critic_lr0
             
             elif self.curriculum_level == 1:
                 self.allocator_agent.update_learning_rate(self.config.alloc_lr)
                 for param_group in self.optimizer_actor.param_groups:
-                    param_group['lr'] = self.config.actor_lr
+                    param_group['lr'] = self.config.actor_lr1
                 for param_group in self.optimizer_critic.param_groups:
-                    param_group['lr'] = self.config.critic_lr
+                    param_group['lr'] = self.config.critic_lr1
 
             # 根据课程等级调整学习率
             elif self.curriculum_level == 2:
                 # Level 2: PPO 使用较小的学习率
                 for param_group in self.optimizer_actor.param_groups:
-                    param_group['lr'] = self.config.actor_lr_level1
+                    param_group['lr'] = self.config.actor_lr_level2
                 for param_group in self.optimizer_critic.param_groups:
-                    param_group['lr'] = self.config.critic_lr_level1
+                    param_group['lr'] = self.config.critic_lr_level2
                 print(f"[课程升级] Level 2: PPO lr -> actor={self.config.actor_lr_level1}, critic={self.config.critic_lr_level1}")
                 
             elif self.curriculum_level == 3:
                 # Level 3: PPO 恢复初始学习率
                 for param_group in self.optimizer_actor.param_groups:
-                    param_group['lr'] = self.config.actor_lr
+                    param_group['lr'] = self.config.actor_lr3
                 for param_group in self.optimizer_critic.param_groups:
-                    param_group['lr'] = self.config.critic_lr
+                    param_group['lr'] = self.config.critic_lr3
                 print(f"[课程升级] Level 3: PPO lr -> actor={self.config.actor_lr}, critic={self.config.critic_lr}")
 
         # 构建指标
