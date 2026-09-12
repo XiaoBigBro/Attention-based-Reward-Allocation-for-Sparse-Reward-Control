@@ -463,26 +463,15 @@ class RewardAllocatorAgent:
         actions: np.ndarray,
         actions_dist: np.ndarray,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        分配奖励
 
-        输入（N 个有效 transition，无 dummy，长度必须一致）:
-            states:       [N, 2*obs_dim]    状态对 concat[s_i, s_{i+1}]
-            actions:      [N, action_dim]   实际动作 a_0..a_{N-1}
-            actions_dist: [N, action_dim*2] 动作分布 (mean, log_std)
-
-        输出:
-            weights: [N] 每个 transition 的权重，保留计算图供训练
-            entropy: [B] 权重分布的熵，保留计算图供训练
-        """
         with torch.no_grad():
             states_t = torch.FloatTensor(states).to(self.device)
             actions_t = torch.FloatTensor(actions).to(self.device)
             actions_dist_t = torch.FloatTensor(actions_dist).to(self.device)
 
-        weights, entropy = self.network(states_t, actions_t, actions_dist_t)
+        _, weights, _ = self.network(states_t, actions_t, actions_dist_t)
 
-        return weights, entropy
+        return weights
 
 
     # TD 训练
