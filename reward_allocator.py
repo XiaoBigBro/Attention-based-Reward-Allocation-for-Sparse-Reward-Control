@@ -251,7 +251,6 @@ class RewardAllocator(nn.Module):
         num_layers: int,#Transformer层数
         d_ff: int,#前馈网络隐藏层维度
         dropout: float,
-        entropy_coef: float,#熵正则化系数
         max_seq_len: int ,#最大序列长度
     ):
         super().__init__()
@@ -259,7 +258,6 @@ class RewardAllocator(nn.Module):
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.d_model = d_model
-        self.entropy_coef = entropy_coef
 
         # Q 编码器: 状态对 (concat[s_i, s_{i+1}]) 编码 + 位置编码
         # 输入维度 = 2 * obs_dim（相邻两状态拼接，携带增量信息）
@@ -311,19 +309,7 @@ class RewardAllocator(nn.Module):
         states: torch.Tensor,
         actions: torch.Tensor,
         actions_dist: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        前向传播
-
-        输入（N 个有效 transition，无 dummy，长度必须一致）:
-            states:       [N, 2*obs_dim]    状态对 concat[s_i, s_{i+1}]
-            actions:      [N, action_dim]   实际动作 a_0..a_{N-1}
-            actions_dist: [N, action_dim*2] 动作分布 (mean, log_std)
-
-        输出:
-            weights: [N] 每个 transition 的权重，Σ=1
-            entropy: [B] 权重分布的熵，保留计算图
-        """
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         # 处理单序列输入
         if states.dim() == 2:
             states = states.unsqueeze(0)
@@ -333,52 +319,22 @@ class RewardAllocator(nn.Module):
         else:
             squeeze_output = False
 
-        logits, weights, entropy = self._forward_no_squeeze(states, actions, actions_dist)
+        logits, weights = self._forward_no_squeeze(states, actions, actions_dist)
 
         # 如果输入是单序列，压缩输出
         if squeeze_output:
             logits = logits.squeeze(0)
             weights = weights.squeeze(0)
-            entropy = entropy.squeeze(0)
 
-        return logits, weights, entropy
+        return logits, weights
 
-    def compute_td_loss(
-        self,
-        train_buffer: TrainingBuffer,
-        gamma: float,
-        v_online: torch.Tensor,
-        v_target_next: torch.Tensor,
-    ) -> Tuple[torch.Tensor, dict]:
-
-        # weights 是 tensor，直接使用（保留计算图供反向传播）
-        weights_td = train_buffer.weights.to(v_online.device)
-        terminal_reward = train_buffer.terminal_reward
-
-        td_target = terminal_reward * weights_td + gamma * v_target_next
-        td_error = td_target - v_online
-        td_loss = (td_error ** 2).mean()
-
-        # 熵正则化：使用 _forward_no_squeeze 已算好的熵，避免重复计算
-        entropy_val = train_buffer.weights_entropy.to(v_online.device).mean()
-        entropy_loss = self.entropy_coef * entropy_val  # 正号：最小化熵
-        total_loss = td_loss + entropy_loss
-
-        # 构建诊断指标
-        metrics = {
-            'td_loss': td_loss.item() if isinstance(td_loss, torch.Tensor) else td_loss,
-            'entropy_loss': entropy_loss.item() if isinstance(entropy_loss, torch.Tensor) else entropy_loss,
-            'total_loss': total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss,
-        }
-
-        return total_loss, metrics
 
     def _forward_no_squeeze(
         self,
         states: torch.Tensor,
         actions: torch.Tensor,
         actions_dist: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         batch_size, seq_len, _ = states.shape
 
         # Q = 状态对（concat[s_i, s_{i+1}]，携带增量信息）
@@ -407,9 +363,7 @@ class RewardAllocator(nn.Module):
         logits = self.output_proj(fused).squeeze(-1)  # [B, N]
         weights = F.softmax(logits, dim=-1)  # [B, N]
 
-        entropy = -(weights * torch.log(weights + 1e-8)).sum(dim=-1)
-
-        return logits, weights, entropy
+        return logits, weights
 
 
 # --- RewardAllocatorAgent ---
@@ -423,7 +377,6 @@ class RewardAllocatorConfig:
     num_layers: int  # Transformer层数
     d_ff: int  # 前馈网络隐藏层维度
     dropout: float  # Dropout比率
-    entropy_coef: float  # 熵正则化系数（用于鼓励探索）
     learning_rate: float  # 学习率
     max_seq_len: int  # 最大序列长度
 
@@ -447,7 +400,6 @@ class RewardAllocatorAgent:
             num_layers=config.num_layers,
             d_ff=config.d_ff,
             dropout=config.dropout,
-            entropy_coef=config.entropy_coef,
             max_seq_len=config.max_seq_len,#最大序列长度
         ).to(self.device)
 
@@ -462,66 +414,16 @@ class RewardAllocatorAgent:
         states: np.ndarray,
         actions: np.ndarray,
         actions_dist: np.ndarray,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor]:
 
         with torch.no_grad():
             states_t = torch.FloatTensor(states).to(self.device)
             actions_t = torch.FloatTensor(actions).to(self.device)
             actions_dist_t = torch.FloatTensor(actions_dist).to(self.device)
 
-        _, weights, _ = self.network(states_t, actions_t, actions_dist_t)
+        _, weights = self.network(states_t, actions_t, actions_dist_t)
 
         return weights
-
-
-    # TD 训练
-    def TD_train_step(
-        self,
-        train_buffer: TrainingBuffer ,
-        gamma: float ,
-        v_online = None,
-        v_target_next = None,
-    ) -> dict:
-        """
-        训练一步
-
-        输入:
-            train_buffer: TrainingBuffer，含 weights 和 weights_entropy（保留计算图）
-            gamma: float
-            v_online: [N] V(s_1)...V(s_N)，应已断开 Critic 计算图
-            v_target_next: [N] V(s_2)...V(s_{N+1})
-        """
-        self.network.train()
-
-        # 转为 tensor
-        if v_online is not None:
-            if not isinstance(v_online, torch.Tensor):
-                v_online_t = torch.FloatTensor(v_online).to(self.device)
-            else:
-                v_online_t = v_online.to(self.device)
-        else:
-            v_online_t = None
-        if v_target_next is not None:
-            if not isinstance(v_target_next, torch.Tensor):
-                v_target_next_t = torch.FloatTensor(v_target_next).to(self.device)
-            else:
-                v_target_next_t = v_target_next.to(self.device)
-        else:
-            v_target_next_t = None
-        # gamma 转为 tensor
-
-        # 前向传播
-        self.optimizer.zero_grad()
-        loss, metrics = self.network.compute_td_loss(
-            train_buffer, gamma, v_online_t, v_target_next_t,
-        )
-
-        # 反向传播
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=0.5)
-        self.optimizer.step()
-
-        return metrics
 
     def update_learning_rate(self, lr: float):
         """更新优化器学习率"""
