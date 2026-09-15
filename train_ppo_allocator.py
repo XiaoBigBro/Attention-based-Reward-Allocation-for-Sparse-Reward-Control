@@ -104,7 +104,7 @@ class TrainingConfig:
     curriculum_level: int = 0#课程学习初始等级
 
     # 训练流程
-    total_episodes: int = 10000
+    total_episodes: int = 3000
     log_interval: int = 10#日志间隔
     save_interval: int = 200#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
