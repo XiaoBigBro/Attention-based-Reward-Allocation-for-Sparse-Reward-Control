@@ -89,7 +89,7 @@ class TrainingConfig:
     # 1.0 时 target 太平坦（7.4:2.8:1），梯度被 80 维归一化稀释到 1e-5 量级，500 集也推不动。
     imitation_lr: float = 1e-3#模仿训练学习率
     imitation_batch_episodes: int = 512#模仿训练每批回合数（batch 维=回合，一次梯度更新）
-    imitation_epochs: int = 50#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
+    imitation_epochs: int = 100#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
     imitation_dataset_size: int = 1000#离线训练数据集大小（每 100 次训练时用当前 PPO 现采 N 回合组成固定数据集）
 
     #奖励分配网络level1训练参数
@@ -594,7 +594,7 @@ class PPOTrainerWithAllocator:
             print(f"Epoch {epoch}/{self.config.imitation_epochs}: "
                   f"mse={total_mse/total_steps:.4f}, corr={w_rew_corr:.4f}")
 
-            if epoch >= self.config.imitation_epochs and w_rew_corr > 0.75:
+            if epoch >= self.config.imitation_epochs and w_rew_corr > 0.85:
                 print(f"✅ 训练完成：epoch={epoch}, corr={w_rew_corr:.4f}")
                 break
 
@@ -675,7 +675,6 @@ class PPOTrainerWithAllocator:
             train_buffers_list = []  # 存放多个 TrainingBuffer
             total = 0.0
             self.network.eval()
-            self.allocator_agent.network.eval()
 
             for i in range(self.config.ppo_update_interval):
                 # 1.1 采集轨迹
@@ -693,38 +692,27 @@ class PPOTrainerWithAllocator:
                 r_mix = (1.0 - self._l1_alpha) * dense_rewards + self._l1_alpha * allocated_np
 
                 # # 收集分配网络的数据
-                # imp = np.exp(dense_rewards / self.config.temperature)#用密集奖励函数，不要用r_mix
-                # target = imp / imp.sum()
-                # self.states_arr.append(self._build_state_pairs(raw_buffer.observations))  # [80, 2*obs]
-                # self.actions_arr.append(np.array(raw_buffer.actions[1:], dtype=np.float32))  # [80, act]
-                # self.dists_arr.append(np.array(raw_buffer.get_action_dist()[1:], dtype=np.float32))  # [80, 2*act]
-                # self.targets_arr.append(target)
-                # self.rewards_arr.append(dense_rewards)
+                self.states_arr.append(self._build_state_pairs(raw_buffer.observations))  # [80, 2*obs]
+                self.actions_arr.append(np.array(raw_buffer.actions[1:], dtype=np.float32))  # [80, act]
+                self.dists_arr.append(np.array(raw_buffer.get_action_dist()[1:], dtype=np.float32))  # [80, 2*act]
+                self.rewards_arr.append(dense_rewards)
 
                 # 1.4 计算 GAE 并构建训练缓冲区
                 train_buffer = self.compute_gae_and_train_buffer(raw_buffer, r_mix)
                 train_buffers_list.append(train_buffer)
 
             self.network.train()
-            # 4. batch 训练 PPO
             train_buffers = self.train_merge_buffers(train_buffers_list)
             ppo_metrics = self.train_ppo_step(train_buffers)
 
-            # if self.episode_count % (
-            #         self.config.imitation_dataset_size // self.config.ppo_update_interval) == 0 and self.episode_count != 0:
-            #     self.raw_buffer_list = {"states": np.array(self.states_arr), "actions": np.array(self.actions_arr),
-            #                             "dists": np.array(self.dists_arr),
-            #                             "targets": np.array(self.targets_arr), "rewards": np.array(self.rewards_arr)}
-            #
-            #     self.allocator_agent.network.train()
-            #     alloc_metrics = self.train_allocator_step_imitation(self.raw_buffer_list)
-            #     self.clear_allocator_buffer()
-            # else:
-            #     # 未到离线训练时，alloc_metrics 用默认值（metrics 构造需要）
-            #     alloc_metrics = {"alloc_kl_loss": 0.0, "alloc_mse_loss": 0.0, "alloc_w_rew_corr": 0.0}
+            # 计算分配网络与真实信号的相关性
+            self.raw_buffer_list = {"states": np.array(self.states_arr), "actions": np.array(self.actions_arr),
+                                    "dists": np.array(self.dists_arr), "rewards": np.array(self.rewards_arr)}
+
+            alloc_metrics = self.allocatorw_rew_corr(self.raw_buffer_list)
+            self.clear_allocator_buffer()
 
         else:
-
             train_buffers_list = []  # 存放多个 TrainingBuffer
             total = 0.0
             self.network.eval()
@@ -761,7 +749,6 @@ class PPOTrainerWithAllocator:
 
             alloc_metrics = self.allocatorw_rew_corr(self.raw_buffer_list)
             self.clear_allocator_buffer()
-
 
         # 更新课程学习
         terminal_reward = total / (i+1)
@@ -884,6 +871,8 @@ class PPOTrainerWithAllocator:
                                         "targets": np.array(self.targets_arr), "rewards": np.array(self.rewards_arr)}
                 self.train_allocator_step_imitation(self.raw_buffer_list)
                 self.allocator_agent.update_learning_rate(self.config.alloc_lr1)
+                self.clear_allocator_buffer()
+                self.allocator_agent.network.eval()
 
             # 定时保存
             if self.episode_count % self.config.save_interval == 0:
