@@ -57,8 +57,8 @@ class TrainingConfig:
     actor_lr1: float = 1e-4#课程学习等级1的策略网络学习率
     critic_lr1: float = 1e-4#课程学习等级1的价值网络学习率
 
-    actor_lr2: float = 1e-4  # 课程学习等级2的策略网络学习率
-    critic_lr2: float = 1e-4  # 课程学习等级2的价值网络学习率
+    actor_lr2: float = 5e-5  # 课程学习等级2的策略网络学习率
+    critic_lr2: float = 5e-5  # 课程学习等级2的价值网络学习率
 
     actor_lr3: float = 1e-4  # 课程学习等级3的策略网络学习率
     critic_lr3: float = 1e-4  # 课程学习等级3的价值网络学习率
@@ -87,19 +87,19 @@ class TrainingConfig:
     # 0.1 会 softmax 塌缩成 one-hot（权重全给最高奖励步，推进步信号消失）；
     # 0.5 时 target 为"保持>推进>后退"（约 148:20:2.7），可学且梯度足够强（比 1.0 强约 10 倍）；
     # 1.0 时 target 太平坦（7.4:2.8:1），梯度被 80 维归一化稀释到 1e-5 量级，500 集也推不动。
-    imitation_lr: float = 3e-4#模仿训练学习率
-    imitation_batch_episodes: int = 256#模仿训练每批回合数（batch 维=回合，一次梯度更新）
-    imitation_epochs: int = 8#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
+    imitation_lr: float = 1e-3#模仿训练学习率
+    imitation_batch_episodes: int = 512#模仿训练每批回合数（batch 维=回合，一次梯度更新）
+    imitation_epochs: int = 50#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
     imitation_dataset_size: int = 1000#离线训练数据集大小（每 100 次训练时用当前 PPO 现采 N 回合组成固定数据集）
 
-    # #奖励分配网络level1训练参数
-    # alloc_lr1: float = 3e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
+    #奖励分配网络level1训练参数
+    alloc_lr1: float = 1e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
     curriculum_promote_threshold: float = 160.0#课程学习提升阈值
     curriculum_demote_threshold: float = 50.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 300#课程学习提升冷却期
+    curriculum_promote_cooldown: int = 200#课程学习提升冷却期
     curriculum_demote_cooldown: int = 60#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
@@ -141,6 +141,8 @@ class PPOTrainerWithAllocator:
     """
     def __init__(self, config: TrainingConfig):
         self.config = config
+
+        self.curriculum_changed = False
 
         # 只有显式调用 .format() 时，才会被替换，否则只是普通的字符串
         save_dir = config.save_dir.format(seed=config.seed)
@@ -204,7 +206,6 @@ class PPOTrainerWithAllocator:
             env_id=config.env_id,
             curriculum_level=config.curriculum_level, 
         )
-        self.dense_reward = self.env._dense_reward#奖励模式
         self.curriculum_level = self.env._curriculum_level#课程学习等级
 
         print("[4/5] 初始化课程学习管理器...")
@@ -496,7 +497,7 @@ class PPOTrainerWithAllocator:
         self.rewards_arr = []
 
 
-    def train_allocator_step_imitation(self, dataset) -> Dict[str, float]:
+    def train_allocator_step_imitation(self, dataset):
         """
         训练奖励分配网络（模仿训练）：批量 mini-batch 流程（离线）
         """
@@ -506,6 +507,9 @@ class PPOTrainerWithAllocator:
         T = dataset["targets"]     # [N, 80]
         R = dataset["rewards"]     # [N, 80]，真实密集奖励信号
         n_eps = len(S)
+
+        n_train = int(n_eps * 0.9)
+        n_test = n_eps - n_train
 
         device = self.device
         batch = self.config.imitation_batch_episodes#每次批采集多少个回合
@@ -517,22 +521,36 @@ class PPOTrainerWithAllocator:
         D_gpu = torch.from_numpy(D).float().to(device)  # [N, 80, 2*act]
         T_gpu = torch.from_numpy(T).float().to(device)  # [N, 80]
 
+        S_gpu_train = S_gpu[:n_train]
+        A_gpu_train = A_gpu[:n_train]
+        D_gpu_train = D_gpu[:n_train]
+        T_gpu_train = T_gpu[:n_train]
+
+        S_gpu_test = S_gpu[n_train:]
+        A_gpu_test = A_gpu[n_train:]
+        D_gpu_test = D_gpu[n_train:]
+        T_gpu_test = T_gpu[n_train:]
+        R_test = R[n_train:]
+        w_rew_corr =0.0
+        epoch = 0
 
         # ---------- 2~4. 多 epoch mini-batch 训练 ----------
         total_kl, total_mse, total_steps = 0.0, 0.0, 0
-        for epoch in range(self.config.imitation_epochs):
 
-            order = np.random.permutation(n_eps)  # 每 epoch 重新打乱
+        while epoch < self.config.imitation_epochs*3 :
 
-            for start in range(0, n_eps, batch):
+            self.allocator_agent.network.train()
+            order = np.random.permutation(n_train)  # 每 epoch 重新打乱
+
+            for start in range(0, n_train, batch):
 
                 idx = order[start:start + batch]
                 idx_gpu = torch.from_numpy(idx).long().to(device)
 
-                s = S_gpu[idx_gpu]  # [B, 80, 2*obs]
-                a = A_gpu[idx_gpu]  # [B, 80, act]
-                d = D_gpu[idx_gpu]  # [B, 80, 2*act]
-                t = T_gpu[idx_gpu]  # [B, 80]
+                s = S_gpu_train[idx_gpu]  # [B, 80, 2*obs]
+                a = A_gpu_train[idx_gpu]  # [B, 80, act]
+                d = D_gpu_train[idx_gpu]  # [B, 80, 2*act]
+                t = T_gpu_train[idx_gpu]  # [B, 80]
 
                 logits, w = self.allocator_agent.network(s, a, d)  # [B, 80]
 
@@ -554,26 +572,31 @@ class PPOTrainerWithAllocator:
                 total_mse += mse_loss.item()
                 total_steps += 1
 
-        # ---------- 5. 诊断 corr：训练后全体回合 权重 vs 奖励 ----------
-        corrs = []
-        with torch.no_grad():
-            for i in range(n_eps):
+            # ---------- 5. 诊断 corr：训练后全体回合 权重 vs 奖励 ----------
+            corrs = []
+            self.allocator_agent.network.eval()
+            with torch.no_grad():
+                diag_batch = 128
+                for i in range(0,n_test,diag_batch):
 
-                s = S_gpu[i:i+1]  # [B, 80, 2*obs]
-                a = A_gpu[i:i+1]  # [B, 80, act]
-                d = D_gpu[i:i+1]  # [B, 80, 2*act]
+                    end = min(i + diag_batch, n_test)
+                    s = S_gpu_test[i:end]  # [B, 80, 2*obs]
+                    a = A_gpu_test[i:end]  # [B, 80, act]
+                    d = D_gpu_test[i:end]  # [B, 80, 2*act]
 
-                _, w = self.allocator_agent.network(s, a, d)
-                wn = w.cpu().numpy()[0]
-                if R[i].std() > 1e-9:
-                    corrs.append(float(np.corrcoef(R[i], wn)[0, 1]))
-        w_rew_corr = float(np.mean(corrs)) if corrs else 0.0
+                    _, w = self.allocator_agent.network(s, a, d)
+                    wn = w.cpu().numpy()
+                    for j in range(end - i):
+                        if R_test[i+j].std() > 1e-9:
+                            corrs.append(float(np.corrcoef(R_test[i+j], wn[j])[0, 1]))
+            w_rew_corr = float(np.mean(corrs)) if corrs else 0.0
+            epoch += 1
+            print(f"Epoch {epoch}/{self.config.imitation_epochs}: "
+                  f"mse={total_mse/total_steps:.4f}, corr={w_rew_corr:.4f}")
 
-        return {
-            "alloc_kl_loss": total_kl / max(total_steps, 1),
-            "alloc_mse_loss": total_mse / max(total_steps, 1),
-            "alloc_w_rew_corr": w_rew_corr,
-        }
+            if epoch >= self.config.imitation_epochs and w_rew_corr > 0.75:
+                print(f"✅ 训练完成：epoch={epoch}, corr={w_rew_corr:.4f}")
+                break
 
     def allocatorw_rew_corr(self, dataset) -> Dict[str, float]:
 
@@ -611,11 +634,6 @@ class PPOTrainerWithAllocator:
     def train_one_episode(self) -> TrainingMetrics:
 
         if self.curriculum_level == 0:
-            '''
-            level 0：密集奖励模式。PPO 用真实密集奖励信号做全 batch 训练；
-            分配网络离线采集 imitation_dataset_size 集做模仿训练。
-            ppo每回合采集ppo_update_interval集做训练
-            '''
 
             train_buffers_list = []  # 存放多个 TrainingBuffer
             total = 0.0
@@ -647,17 +665,7 @@ class PPOTrainerWithAllocator:
             train_buffers = self.train_merge_buffers(train_buffers_list)
             # 4. batch 训练 PPO，用密集奖励信号训练
             ppo_metrics = self.train_ppo_step(train_buffers)
-            #目前是1000个回合训练一次分配网络
-            if self.episode_count % (self.config.imitation_dataset_size // self.config.ppo_update_interval) == 0 and self.episode_count != 0:
-                self.raw_buffer_list = {"states": np.array(self.states_arr),"actions": np.array(self.actions_arr),"dists": np.array(self.dists_arr),
-                                            "targets": np.array(self.targets_arr),"rewards": np.array(self.rewards_arr)}
-
-                self.allocator_agent.network.train()
-                alloc_metrics = self.train_allocator_step_imitation(self.raw_buffer_list)
-                self.clear_allocator_buffer()
-            else:
-                # 未到离线训练时，alloc_metrics 用默认值（metrics 构造需要）
-                alloc_metrics = {"alloc_kl_loss": 0.0, "alloc_mse_loss": 0.0,"alloc_w_rew_corr": 0.0}
+            alloc_metrics = {"alloc_kl_loss": 0.0, "alloc_mse_loss": 0.0, "alloc_w_rew_corr": 0.0}
 
         elif self.curriculum_level == 1:
 
@@ -684,14 +692,14 @@ class PPOTrainerWithAllocator:
                 allocated_np = allocated.detach().cpu().numpy()
                 r_mix = (1.0 - self._l1_alpha) * dense_rewards + self._l1_alpha * allocated_np
 
-                # 收集分配网络的数据
-                imp = np.exp(dense_rewards / self.config.temperature)#用密集奖励函数，不要用r_mix
-                target = imp / imp.sum()
-                self.states_arr.append(self._build_state_pairs(raw_buffer.observations))  # [80, 2*obs]
-                self.actions_arr.append(np.array(raw_buffer.actions[1:], dtype=np.float32))  # [80, act]
-                self.dists_arr.append(np.array(raw_buffer.get_action_dist()[1:], dtype=np.float32))  # [80, 2*act]
-                self.targets_arr.append(target)
-                self.rewards_arr.append(dense_rewards)
+                # # 收集分配网络的数据
+                # imp = np.exp(dense_rewards / self.config.temperature)#用密集奖励函数，不要用r_mix
+                # target = imp / imp.sum()
+                # self.states_arr.append(self._build_state_pairs(raw_buffer.observations))  # [80, 2*obs]
+                # self.actions_arr.append(np.array(raw_buffer.actions[1:], dtype=np.float32))  # [80, act]
+                # self.dists_arr.append(np.array(raw_buffer.get_action_dist()[1:], dtype=np.float32))  # [80, 2*act]
+                # self.targets_arr.append(target)
+                # self.rewards_arr.append(dense_rewards)
 
                 # 1.4 计算 GAE 并构建训练缓冲区
                 train_buffer = self.compute_gae_and_train_buffer(raw_buffer, r_mix)
@@ -702,18 +710,18 @@ class PPOTrainerWithAllocator:
             train_buffers = self.train_merge_buffers(train_buffers_list)
             ppo_metrics = self.train_ppo_step(train_buffers)
 
-            if self.episode_count % (
-                    self.config.imitation_dataset_size // self.config.ppo_update_interval) == 0 and self.episode_count != 0:
-                self.raw_buffer_list = {"states": np.array(self.states_arr), "actions": np.array(self.actions_arr),
-                                        "dists": np.array(self.dists_arr),
-                                        "targets": np.array(self.targets_arr), "rewards": np.array(self.rewards_arr)}
-
-                self.allocator_agent.network.train()
-                alloc_metrics = self.train_allocator_step_imitation(self.raw_buffer_list)
-                self.clear_allocator_buffer()
-            else:
-                # 未到离线训练时，alloc_metrics 用默认值（metrics 构造需要）
-                alloc_metrics = {"alloc_kl_loss": 0.0, "alloc_mse_loss": 0.0, "alloc_w_rew_corr": 0.0}
+            # if self.episode_count % (
+            #         self.config.imitation_dataset_size // self.config.ppo_update_interval) == 0 and self.episode_count != 0:
+            #     self.raw_buffer_list = {"states": np.array(self.states_arr), "actions": np.array(self.actions_arr),
+            #                             "dists": np.array(self.dists_arr),
+            #                             "targets": np.array(self.targets_arr), "rewards": np.array(self.rewards_arr)}
+            #
+            #     self.allocator_agent.network.train()
+            #     alloc_metrics = self.train_allocator_step_imitation(self.raw_buffer_list)
+            #     self.clear_allocator_buffer()
+            # else:
+            #     # 未到离线训练时，alloc_metrics 用默认值（metrics 构造需要）
+            #     alloc_metrics = {"alloc_kl_loss": 0.0, "alloc_mse_loss": 0.0, "alloc_w_rew_corr": 0.0}
 
         else:
 
@@ -757,15 +765,13 @@ class PPOTrainerWithAllocator:
 
         # 更新课程学习
         terminal_reward = total / (i+1)
-        curriculum_changed = self.curriculum_manager.on_episode_end(terminal_reward)
+        self.curriculum_changed = self.curriculum_manager.on_episode_end(terminal_reward)
         self.curriculum_level = self.curriculum_manager.get_current_level()
 
-        if curriculum_changed:
+        if self.curriculum_changed:
 
             self.env.set_curriculum_level(self.curriculum_level)
             # 获取当前奖励模式
-            self.dense_reward = self.env._dense_reward
-            self.clear_allocator_buffer()
             
             if self.curriculum_level == 0:
                 self.allocator_agent.update_learning_rate(self.config.imitation_lr)
@@ -775,7 +781,7 @@ class PPOTrainerWithAllocator:
                     param_group['lr'] = self.config.critic_lr0
             
             elif self.curriculum_level == 1:
-                # self.allocator_agent.update_learning_rate(self.config.alloc_lr1)
+
                 for param_group in self.optimizer_actor.param_groups:
                     param_group['lr'] = self.config.actor_lr1
                 for param_group in self.optimizer_critic.param_groups:
@@ -797,7 +803,6 @@ class PPOTrainerWithAllocator:
                     param_group['lr'] = self.config.actor_lr3
                 for param_group in self.optimizer_critic.param_groups:
                     param_group['lr'] = self.config.critic_lr3
-
 
         # 构建指标
         metrics = TrainingMetrics(
@@ -870,6 +875,15 @@ class PPOTrainerWithAllocator:
                 pbar.write(f"  分配网络权重-奖励相关: {metrics.alloc_w_rew_corr:.3f}")
 
             self.episode_count += 1
+
+            if self.curriculum_changed and self.curriculum_level == 1:
+                print("分配网络训练")
+                # 分配网络的训练
+                self.raw_buffer_list = {"states": np.array(self.states_arr), "actions": np.array(self.actions_arr),
+                                        "dists": np.array(self.dists_arr),
+                                        "targets": np.array(self.targets_arr), "rewards": np.array(self.rewards_arr)}
+                self.train_allocator_step_imitation(self.raw_buffer_list)
+                self.allocator_agent.update_learning_rate(self.config.alloc_lr1)
 
             # 定时保存
             if self.episode_count % self.config.save_interval == 0:
