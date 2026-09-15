@@ -42,28 +42,9 @@ class TrainingConfig:
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 0.5#策略网络log标准差最大值
-    log_std_init: float = 0.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = 0.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
-    '''
-    gamma 控制的是“未来奖励的折现速度”。
-    调小 gamma（比如 0.97）会让未来奖励衰减更快，
-    实际上也是在“缩短”价值估计的依赖长度，也能起到一定的稳定作用。
-    公式：G_t = r_t + gamma * G_{t+1} + gamma^2 * G_{t+2} + ... + gamma^n * G_{t+n}
-
-    lam决定了你信任多少步的 TD 误差。但是分配网络不稳定，也就导致TD误差不准确，
-    所以lam越小，策略更新越稳定。
-    公式：A_t = delta_t + gamma * lam * A_{t+1} + gamma^2 * lam^2 * A_{t+2} + ... + gamma^n * lam^n * A_{t+n}
-    
-    entropy_coef鼓励策略不要过早变“确定”。也就是说，
-    即使网络想减小 log_std 来“利用”，entropy_coef 也会“拉它一把”，让它保留一定的随机性。
-    log_std 是 “策略自己决定的探索力度”。
-    entropy_coef 是 “外部强推的探索压力”。
-    
-    价值估计震荡严重 降低 value_clip_eps（如 0.1），降低 tau（如 0.005）
-    
-    tau=0.01 是 DQN/PPO 的标准值，稳定可靠。如果训练震荡，可以降到 0.005。
-    '''
 
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.9#GAE参数
@@ -76,11 +57,11 @@ class TrainingConfig:
     actor_lr1: float = 1e-4#课程学习等级1的策略网络学习率
     critic_lr1: float = 1e-4#课程学习等级1的价值网络学习率
 
-    actor_lr2: float = 5e-5  # 课程学习等级2的策略网络学习率
-    critic_lr2: float = 5e-5  # 课程学习等级2的价值网络学习率
+    actor_lr2: float = 1e-4  # 课程学习等级2的策略网络学习率
+    critic_lr2: float = 1e-4  # 课程学习等级2的价值网络学习率
 
-    actor_lr3: float = 3e-5  # 课程学习等级3的策略网络学习率
-    critic_lr3: float = 3e-5  # 课程学习等级3的价值网络学习率
+    actor_lr3: float = 5e-5  # 课程学习等级3的策略网络学习率
+    critic_lr3: float = 5e-5  # 课程学习等级3的价值网络学习率
 
     max_grad_norm: float = 0.5  # 最大梯度范数，防止梯度爆炸
     value_clip_eps: float = 0.2  # 价值裁剪 epsilon，防止价值估计过拟合
@@ -90,7 +71,7 @@ class TrainingConfig:
 
     ppo_epochs: int = 4 #每批数据训练多少次
     ppo_update_interval: int = 50 #收集多少回合再进行训练
-    critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
+    critic_updates_per_epoch: int = 3 #level0里面，价值网络额外更新的次数
     mini_batch_size = 1024
 
     # 奖励分配网络初始化超参数
@@ -98,22 +79,21 @@ class TrainingConfig:
     alloc_num_heads: int = 4#奖励分配网络头数
     alloc_num_layers: int = 2#奖励分配网络层数
     alloc_d_ff: int = 128#奖励分配网络前馈网络隐藏层维度，如果分配网络学得慢，可以调大
-    alloc_dropout: float = 0.2#奖励分配网络dropout率
+    alloc_dropout: float = 0.1#奖励分配网络dropout率
     max_seq_len: int = 100#奖励分配网络最大序列长度
 
     # 分配网络level0模仿训练参数
-    temperature: float = 0.6#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）。
+    temperature: float = 0.7#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）。
     # 0.1 会 softmax 塌缩成 one-hot（权重全给最高奖励步，推进步信号消失）；
     # 0.5 时 target 为"保持>推进>后退"（约 148:20:2.7），可学且梯度足够强（比 1.0 强约 10 倍）；
     # 1.0 时 target 太平坦（7.4:2.8:1），梯度被 80 维归一化稀释到 1e-5 量级，500 集也推不动。
     imitation_lr: float = 1e-3#模仿训练学习率
-    imitation_batch_episodes: int = 124#模仿训练每批回合数（batch 维=回合，一次梯度更新）
-    imitation_epochs: int = 10#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
+    imitation_batch_episodes: int = 256#模仿训练每批回合数（batch 维=回合，一次梯度更新）
+    imitation_epochs: int = 8#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
     imitation_dataset_size: int = 1000#离线训练数据集大小（每 100 次训练时用当前 PPO 现采 N 回合组成固定数据集）
 
     #奖励分配网络level1训练参数
     alloc_lr1: float = 3e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
-    level1_dataset_size: int = 500#离线训练数据集大小
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
@@ -122,9 +102,6 @@ class TrainingConfig:
     curriculum_promote_cooldown: int = 200#课程学习提升冷却期
     curriculum_demote_cooldown: int = 40#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
-
-    # Level 1（PPO 混合奖励过渡训练）
-    level1_mini_batch_size: int = 512#Level 1 PPO mini-batch 大小（时间步）
 
     # 训练流程
     total_episodes: int = 10000
@@ -685,7 +662,7 @@ class PPOTrainerWithAllocator:
         elif self.curriculum_level == 1:
 
             self._l1_alpha = self.curriculum_manager.level_episode_counts[self.curriculum_level] / self.config.curriculum_promote_cooldown
-            self._l1_alpha = min(1.0, 2 * self._l1_alpha)
+            self._l1_alpha = min(1.0, 4 * self._l1_alpha)
 
             train_buffers_list = []  # 存放多个 TrainingBuffer
             total = 0.0
@@ -726,7 +703,7 @@ class PPOTrainerWithAllocator:
             ppo_metrics = self.train_ppo_step(train_buffers)
 
             if self.episode_count % (
-                    self.config.level1_dataset_size // self.config.ppo_update_interval) == 0 and self.episode_count != 0:
+                    self.config.imitation_dataset_size // self.config.ppo_update_interval) == 0 and self.episode_count != 0:
                 self.raw_buffer_list = {"states": np.array(self.states_arr), "actions": np.array(self.actions_arr),
                                         "dists": np.array(self.dists_arr),
                                         "targets": np.array(self.targets_arr), "rewards": np.array(self.rewards_arr)}
