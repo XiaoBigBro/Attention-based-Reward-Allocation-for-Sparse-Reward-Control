@@ -42,13 +42,13 @@ class TrainingConfig:
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 0.5#策略网络log标准差最大值
-    log_std_init: float = 0.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = 0.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
 
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.9#GAE参数
-    clip_eps: float = 0.05#PPO裁剪参数,控制策略更新的稳定性.
+    clip_eps: float = 0.1#PPO裁剪参数,控制策略更新的稳定性.
     entropy_coef: float = 0.01  # 熵正则化系数
 
     actor_lr0: float = 3e-4  # 策略网络学习率
@@ -80,27 +80,27 @@ class TrainingConfig:
     alloc_num_layers: int = 2#奖励分配网络层数
     alloc_d_ff: int = 128#奖励分配网络前馈网络隐藏层维度，如果分配网络学得慢，可以调大
     alloc_dropout: float = 0.2#奖励分配网络dropout率
-    max_seq_len: int = 100#奖励分配网络最大序列长度
+    max_seq_len: int = 90#奖励分配网络最大序列长度
 
     # 分配网络level0模仿训练参数
     temperature: float = 0.7#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）。
     # 0.1 会 softmax 塌缩成 one-hot（权重全给最高奖励步，推进步信号消失）；
     # 0.5 时 target 为"保持>推进>后退"（约 148:20:2.7），可学且梯度足够强（比 1.0 强约 10 倍）；
     # 1.0 时 target 太平坦（7.4:2.8:1），梯度被 80 维归一化稀释到 1e-5 量级，500 集也推不动。
-    imitation_lr: float = 1e-3#模仿训练学习率
+    imitation_lr: float = 3e-4#模仿训练学习率
     imitation_batch_episodes: int = 256#模仿训练每批回合数（batch 维=回合，一次梯度更新）
     imitation_epochs: int = 8#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
     imitation_dataset_size: int = 1000#离线训练数据集大小（每 100 次训练时用当前 PPO 现采 N 回合组成固定数据集）
 
-    #奖励分配网络level1训练参数
-    alloc_lr1: float = 3e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
+    # #奖励分配网络level1训练参数
+    # alloc_lr1: float = 3e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
     curriculum_promote_threshold: float = 160.0#课程学习提升阈值
     curriculum_demote_threshold: float = 50.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 200#课程学习提升冷却期
-    curriculum_demote_cooldown: int = 40#课程学习降级冷却期
+    curriculum_promote_cooldown: int = 300#课程学习提升冷却期
+    curriculum_demote_cooldown: int = 60#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
     # 训练流程
@@ -775,7 +775,7 @@ class PPOTrainerWithAllocator:
                     param_group['lr'] = self.config.critic_lr0
             
             elif self.curriculum_level == 1:
-                self.allocator_agent.update_learning_rate(self.config.alloc_lr1)
+                # self.allocator_agent.update_learning_rate(self.config.alloc_lr1)
                 for param_group in self.optimizer_actor.param_groups:
                     param_group['lr'] = self.config.actor_lr1
                 for param_group in self.optimizer_critic.param_groups:
