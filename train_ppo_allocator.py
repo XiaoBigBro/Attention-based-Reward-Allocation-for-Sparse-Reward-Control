@@ -97,7 +97,7 @@ class TrainingConfig:
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
-    curriculum_promote_threshold: float = 160.0#课程学习提升阈值
+    curriculum_promote_threshold: float = 150.0#课程学习提升阈值
     curriculum_demote_threshold: float = 50.0#课程学习降级阈值
     curriculum_promote_cooldown: int = 200#课程学习提升冷却期
     curriculum_demote_cooldown: int = 60#课程学习降级冷却期
