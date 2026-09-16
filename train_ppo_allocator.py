@@ -508,8 +508,11 @@ class PPOTrainerWithAllocator:
         R = dataset["rewards"]     # [N, 80]，真实密集奖励信号
         n_eps = len(S)
 
+        # ========== 先打乱，再划分 ==========
+        indices = np.random.permutation(n_eps)
         n_train = int(n_eps * 0.9)
-        n_test = n_eps - n_train
+        train_idx = indices[:n_train]
+        test_idx = indices[n_train:]
 
         device = self.device
         batch = self.config.imitation_batch_episodes#每次批采集多少个回合
@@ -521,16 +524,16 @@ class PPOTrainerWithAllocator:
         D_gpu = torch.from_numpy(D).float().to(device)  # [N, 80, 2*act]
         T_gpu = torch.from_numpy(T).float().to(device)  # [N, 80]
 
-        S_gpu_train = S_gpu[:n_train]
-        A_gpu_train = A_gpu[:n_train]
-        D_gpu_train = D_gpu[:n_train]
-        T_gpu_train = T_gpu[:n_train]
+        S_gpu_train = S_gpu[train_idx]
+        A_gpu_train = A_gpu[train_idx]
+        D_gpu_train = D_gpu[train_idx]
+        T_gpu_train = T_gpu[train_idx]
 
-        S_gpu_test = S_gpu[n_train:]
-        A_gpu_test = A_gpu[n_train:]
-        D_gpu_test = D_gpu[n_train:]
-        T_gpu_test = T_gpu[n_train:]
-        R_test = R[n_train:]
+        S_gpu_test = S_gpu[test_idx]
+        A_gpu_test = A_gpu[test_idx]
+        D_gpu_test = D_gpu[test_idx]
+        T_gpu_test = T_gpu[test_idx]
+        R_test = R[test_idx]
         w_rew_corr =0.0
         epoch = 0
 
