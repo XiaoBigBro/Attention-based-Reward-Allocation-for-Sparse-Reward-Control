@@ -54,11 +54,11 @@ class TrainingConfig:
     actor_lr0: float = 3e-4  # 策略网络学习率
     critic_lr0: float = 3e-4  # 价值网络学习率
 
-    actor_lr1: float = 1e-4#课程学习等级1的策略网络学习率
-    critic_lr1: float = 1e-4#课程学习等级1的价值网络学习率
+    actor_lr1: float = 3e-4#课程学习等级1的策略网络学习率
+    critic_lr1: float = 3e-4#课程学习等级1的价值网络学习率
 
-    actor_lr2: float = 5e-5  # 课程学习等级2的策略网络学习率
-    critic_lr2: float = 5e-5  # 课程学习等级2的价值网络学习率
+    actor_lr2: float = 1e-4  # 课程学习等级2的策略网络学习率
+    critic_lr2: float = 1e-4  # 课程学习等级2的价值网络学习率
 
     actor_lr3: float = 1e-4  # 课程学习等级3的策略网络学习率
     critic_lr3: float = 1e-4  # 课程学习等级3的价值网络学习率
