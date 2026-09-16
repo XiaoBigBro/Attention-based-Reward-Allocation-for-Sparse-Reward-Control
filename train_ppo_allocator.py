@@ -42,20 +42,20 @@ class TrainingConfig:
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 0.5#策略网络log标准差最大值
-    log_std_init: float = 0.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = 0.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
 
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.9#GAE参数
     clip_eps: float = 0.1#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.01  # 熵正则化系数
+    entropy_coef: float = 0.001  # 熵正则化系数
 
     actor_lr0: float = 3e-4  # 策略网络学习率
     critic_lr0: float = 3e-4  # 价值网络学习率
 
-    actor_lr1: float = 3e-4#课程学习等级1的策略网络学习率
-    critic_lr1: float = 3e-4#课程学习等级1的价值网络学习率
+    actor_lr1: float = 1e-4#课程学习等级1的策略网络学习率
+    critic_lr1: float = 1e-4#课程学习等级1的价值网络学习率
 
     actor_lr2: float = 1e-4  # 课程学习等级2的策略网络学习率
     critic_lr2: float = 1e-4  # 课程学习等级2的价值网络学习率
@@ -97,14 +97,14 @@ class TrainingConfig:
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
-    curriculum_promote_threshold: float = 150.0#课程学习提升阈值
+    curriculum_promote_threshold: float = 160.0#课程学习提升阈值
     curriculum_demote_threshold: float = 50.0#课程学习降级阈值
     curriculum_promote_cooldown: int = 200#课程学习提升冷却期
     curriculum_demote_cooldown: int = 60#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
     # 训练流程
-    total_episodes: int = 3000
+    total_episodes: int = 1000
     log_interval: int = 10#日志间隔
     save_interval: int = 200#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
