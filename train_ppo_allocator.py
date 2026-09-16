@@ -510,7 +510,10 @@ class PPOTrainerWithAllocator:
 
         # ========== 先打乱，再划分 ==========
         indices = np.random.permutation(n_eps)
+
         n_train = int(n_eps * 0.9)
+        n_test = n_eps - n_train
+
         train_idx = indices[:n_train]
         test_idx = indices[n_train:]
 
