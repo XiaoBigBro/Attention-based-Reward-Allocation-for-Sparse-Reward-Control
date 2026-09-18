@@ -3,7 +3,7 @@ FETCH 环境改造 + 课程学习接口
 - 回合级稀疏奖励（中间步 reward=0，回合末 reward=ΣL^p）
 - 4 档预设难度（0~3），可动态切换
 """
-
+#fetchpush
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -25,16 +25,17 @@ NUM_CURRICULUM_LEVELS = 4  # 等级 0.1.2.3，其中0为密集奖励模式，1.2
 @dataclass
 class EnvCurriculumParams:
     """控制难度的参数（单位：米）。"""
-    success_threshold: float = 0.08  #成功判定距离 d
-    target_range: float = 0.28#目标区所在的位置范围大小
+    obj_range :float = 0.05 #物块出生地的范围大小
+    success_threshold: float = 0.08  #成功判定距离
+    target_range: float = 0.05#目标区出生地的范围大小
     max_episode_steps: int = 80#最大回合步数
     dense_reward: bool = True#是否使用密集奖励模式
 
 CURRICULUM_PRESETS = {
-    0: EnvCurriculumParams(target_range=0.28, success_threshold=0.08, max_episode_steps=80,dense_reward=True),
-    1: EnvCurriculumParams(target_range=0.30, success_threshold=0.07, max_episode_steps=80,dense_reward=False),
-    2: EnvCurriculumParams(target_range=0.32, success_threshold=0.06, max_episode_steps=80,dense_reward=False),
-    3: EnvCurriculumParams(target_range=0.34, success_threshold=0.05, max_episode_steps=80,dense_reward=False),
+    0: EnvCurriculumParams(target_range=0.05, success_threshold=0.08,obj_range=0.15,max_episode_steps=80,dense_reward=True),
+    1: EnvCurriculumParams(target_range=0.08, success_threshold=0.07,obj_range=0.15,max_episode_steps=80,dense_reward=False),
+    2: EnvCurriculumParams(target_range=0.12, success_threshold=0.06,obj_range=0.15,max_episode_steps=80,dense_reward=False),
+    3: EnvCurriculumParams(target_range=0.15, success_threshold=0.05,obj_range=0.15,max_episode_steps=80,dense_reward=False),
 }
 
 # ---------------------------------------------------------------------------
@@ -134,6 +135,12 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
             )
         unwrapped.target_range = self._params.target_range
 
+        if not hasattr(unwrapped, "obj_range"):
+            raise AttributeError(
+                f"底层环境 {type(unwrapped).__name__} 缺少 obj_range 属性"
+            )
+        unwrapped.obj_range = self._params.obj_range
+
         if not hasattr(unwrapped, "distance_threshold"):
             raise AttributeError(
                 f"底层环境 {type(unwrapped).__name__} 缺少 distance_threshold 属性"
@@ -171,9 +178,6 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         desired = obs["desired_goal"]
         cur_dist = float(np.linalg.norm(achieved - desired))
 
-        # 是否到达目标区域（增量式奖励的到达项判定）
-        reached = cur_dist < self._params.success_threshold
-
         # 增量式密集奖励：区内恒定 / 区外增量推进
         step_reward = compute_step_reward(
             self._prev_dist, cur_dist,
@@ -195,7 +199,6 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         # info 扩展
         info["step_reward"] = step_reward
         info["step_rewards"] = list(self._step_rewards)  # 所有即时奖励
-        info["reached"] = reached  # 当前步是否到达目标
         info["terminal_reward"] = compute_terminal_reward(self._step_rewards) if truncated else 0.0
         info["curriculum_level"] = self._curriculum_level
         info["use_dense_reward"] = self._dense_reward
