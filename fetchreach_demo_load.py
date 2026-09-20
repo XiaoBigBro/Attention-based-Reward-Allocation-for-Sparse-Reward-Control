@@ -37,7 +37,7 @@ def load_and_demo():
     print("=== 模型演示加载 ===")
     
     # 1. 指定保存的检查点路径
-    save_path = "checkpoints/seed888/checkpoint_1000.pt"  # 使用您项目中已保存的检查点
+    save_path = "checkpoints/seed911/checkpoint_50.pt"  # 使用您项目中已保存的检查点
 
     # 2. 加载保存的检查点
     print(f"正在加载模型: {save_path}")
@@ -50,12 +50,12 @@ def load_and_demo():
 
     # 4. 创建环境（支持渲染）
     print("正在创建环境...")
-    env = make_fetch_env("FetchReach-v4", curriculum_level=1, render_mode="human")
+    env = make_fetch_env("FetchPush-v4", curriculum_level=0, render_mode="human")
     print("✓ 环境创建成功")
 
     # 5. 获取环境维度
-    obs_dim = get_env_obs_dim("FetchReach-v4")
-    action_dim = get_env_action_dim("FetchReach-v4")
+    obs_dim = get_env_obs_dim("FetchPush-v4")
+    action_dim = get_env_action_dim("FetchPush-v4")
     print(f"环境维度 - 观测: {obs_dim}, 动作: {action_dim}")
 
     # 6. 创建网络结构（必须和训练时完全一致）
@@ -97,11 +97,11 @@ def load_and_demo():
             obs_tensor = torch.FloatTensor(obs).unsqueeze(0)
             with torch.no_grad():
                 action, log_prob,log_std, mean = network.get_action(obs_tensor)
-                # action = action.squeeze(0).numpy()
-                action_deterministic = torch.tanh(mean).squeeze(0).cpu().numpy()
+                action = action.squeeze(0).numpy()
+                # action_deterministic = torch.tanh(mean).squeeze(0).cpu().numpy()
 
             # 10. 执行动作
-            next_obs, terminated, truncated, info = env.step(action_deterministic)
+            next_obs, terminated, truncated, info = env.step(action)
             next_obs = unpack_obs(next_obs)
 
             # 检查结束

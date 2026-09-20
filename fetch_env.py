@@ -25,17 +25,17 @@ NUM_CURRICULUM_LEVELS = 4  # 等级 0.1.2.3，其中0为密集奖励模式，1.2
 @dataclass
 class EnvCurriculumParams:
     """控制难度的参数（单位：米）。"""
-    obj_range :float = 0.05 #物块出生地的范围大小
+    obj_range :float = 0.06 #物块出生地的范围大小
     success_threshold: float = 0.08  #成功判定距离
-    target_range: float = 0.05#目标区出生地的范围大小
+    target_range: float = 0.10#目标区出生地的范围大小
     max_episode_steps: int = 80#最大回合步数
     dense_reward: bool = True#是否使用密集奖励模式
 
 CURRICULUM_PRESETS = {
-    0: EnvCurriculumParams(target_range=0.05, success_threshold=0.08,obj_range=0.15,max_episode_steps=80,dense_reward=True),
-    1: EnvCurriculumParams(target_range=0.08, success_threshold=0.07,obj_range=0.15,max_episode_steps=80,dense_reward=False),
-    2: EnvCurriculumParams(target_range=0.12, success_threshold=0.06,obj_range=0.15,max_episode_steps=80,dense_reward=False),
-    3: EnvCurriculumParams(target_range=0.15, success_threshold=0.05,obj_range=0.15,max_episode_steps=80,dense_reward=False),
+    0: EnvCurriculumParams(target_range=0.10, success_threshold=0.08,obj_range=0.07,max_episode_steps=80),
+    1: EnvCurriculumParams(target_range=0.10, success_threshold=0.07,obj_range=0.09,max_episode_steps=80),
+    2: EnvCurriculumParams(target_range=0.12, success_threshold=0.06,obj_range=0.12,max_episode_steps=80),
+    3: EnvCurriculumParams(target_range=0.15, success_threshold=0.05,obj_range=0.15,max_episode_steps=80),
 }
 
 # ---------------------------------------------------------------------------
@@ -47,22 +47,15 @@ def compute_step_reward(
     cur_dist: float,
     threshold: float,
 ) -> float:
-    """增量式密集奖励：推进奖励 + 到达保持奖励，恒正。
 
-    分段公式:
-    - 区外 (cur_dist >= threshold): r = 1 + tanh(k * (prev_dist - cur_dist))
-      - 推进 Δd>0（靠近目标）: r ∈ (1, 2)
-      - 后退 Δd<0（远离目标）: r ∈ (0, 1)
-    - 区内 (cur_dist < threshold): r = 1 + reached_bonus（恒定）
-      - 到达目标区域后任务已完成，区内微小漂移不再按 Δd 计分（避免抖动噪声）
-      - 只有滑出目标区才会跌回区外公式，承受"丢保持奖励 + 后退惩罚"双重损失
-    """
     if cur_dist < threshold:
         # 已到达目标区域：恒定保持奖励（区内微小位移不计 Δd）
         return 1.0 + 1.5
-    delta = prev_dist - cur_dist
-    k = 20.0 if delta >= 0 else 50.0
-    return 1.0 + float(np.tanh(k * delta))
+
+    delta_push = prev_dist - cur_dist
+    r_push = np.tanh(80.0 * delta_push if delta_push >= 0 else 10.0 * delta_push)
+
+    return 1.0 + r_push
 
 #最终奖励
 def compute_terminal_reward(
@@ -96,7 +89,6 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         super().__init__(env)#这里的env就是__init__方法中的env参数，调用父类gym.Wrapper的__init__方法
         self._curriculum_level = curriculum_level
         self._params = CURRICULUM_PRESETS[curriculum_level]
-        self._dense_reward = self._params.dense_reward#True时为密集奖励模式，False时为稀疏奖励模式
 
         # 回合状态
         self._episode_step: int = 0#当前回合的步数
@@ -116,7 +108,6 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
             raise ValueError(f"level must be 0..{NUM_CURRICULUM_LEVELS - 1}, got {level}")
         self._curriculum_level = level
         self._params = CURRICULUM_PRESETS[level]
-        self._dense_reward = self._params.dense_reward  # Level 0 用稠密，Level 1+ 用稀疏
         self._sync_target_range()
 
     # ------------------------------------------------------------------
@@ -166,6 +157,14 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         achieved = obs["achieved_goal"]
         desired = obs["desired_goal"]
         self._prev_dist = float(np.linalg.norm(achieved - desired))
+
+        while np.linalg.norm(achieved - desired) < self._params.success_threshold:
+            obs, info = self.env.reset(**kwargs)
+            # 增量式奖励需要初始距离 d(s_0)（回合起点）
+            achieved = obs["achieved_goal"]
+            desired = obs["desired_goal"]
+            self._prev_dist = float(np.linalg.norm(achieved - desired))
+
         return obs, info
 
     def step(self, action):
@@ -180,8 +179,9 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
 
         # 增量式密集奖励：区内恒定 / 区外增量推进
         step_reward = compute_step_reward(
-            self._prev_dist, cur_dist,
-            self._params.success_threshold,
+            prev_dist=self._prev_dist,
+            cur_dist=cur_dist,
+            threshold = self._params.success_threshold,
         )
         self._prev_dist = cur_dist
 
@@ -201,7 +201,6 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         info["step_rewards"] = list(self._step_rewards)  # 所有即时奖励
         info["terminal_reward"] = compute_terminal_reward(self._step_rewards) if truncated else 0.0
         info["curriculum_level"] = self._curriculum_level
-        info["use_dense_reward"] = self._dense_reward
         info["episode_step"] = self._episode_step
 
         return obs, terminated, truncated, info
@@ -242,3 +241,4 @@ def get_env_action_dim(env_id: str) -> int:
     finally:
         dummy.close()
     return dim
+

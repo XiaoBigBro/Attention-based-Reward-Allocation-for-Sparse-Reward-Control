@@ -36,12 +36,12 @@ class TrainingConfig:
     """训练配置：包含所有可调超参数，供 PPOTrainerWithAllocator 使用"""
     # 环境
     env_id: str = "FetchPush-v4"
-    seed: int = 42
+    seed: int = 888
 
     # PPO actor网络参数
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
-    log_std_max: float = 0.5#策略网络log标准差最大值
+    log_std_max: float = 2.0#策略网络log标准差最大值
     log_std_init: float = 0.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
@@ -49,7 +49,7 @@ class TrainingConfig:
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.9#GAE参数
     clip_eps: float = 0.1#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.01  # 熵正则化系数
+    entropy_coef: float = 0.05  # 熵正则化系数
 
     actor_lr0: float = 3e-4  # 策略网络学习率
     critic_lr0: float = 3e-4  # 价值网络学习率
@@ -106,7 +106,7 @@ class TrainingConfig:
     # 训练流程
     total_episodes: int = 2000
     log_interval: int = 10#日志间隔
-    save_interval: int = 200#保存间隔
+    save_interval: int = 50#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
     device: str = "cuda" if torch.cuda.is_available() else "cpu"  # 设备（自动检测）
 
@@ -889,6 +889,7 @@ class PPOTrainerWithAllocator:
 
         # 训练结束
         elapsed = time.time() - start_time
+        env.close()
         print(f"\n训练完成! 耗时: {elapsed:.1f}秒")
         print(f"平均奖励: {np.mean(terminal_rewards):.2f}")
         print(f"最高奖励: {np.max(terminal_rewards):.2f}")
