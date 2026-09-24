@@ -37,7 +37,7 @@ def load_and_demo():
     print("=== 模型演示加载 ===")
     
     # 1. 指定保存的检查点路径
-    save_path = "checkpoints/seed123/checkpoint_200.pt"  # 使用您项目中已保存的检查点
+    save_path = "checkpoints/seed42/checkpoint_50.pt"  # 使用您项目中已保存的检查点
 
     # 2. 加载保存的检查点
     print(f"正在加载模型: {save_path}")

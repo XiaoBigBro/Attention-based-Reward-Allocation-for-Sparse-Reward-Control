@@ -41,15 +41,15 @@ class TrainingConfig:
     # PPO actor网络参数
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
-    log_std_max: float = 2.0#策略网络log标准差最大值
-    log_std_init: float = 0.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_max: float = 1.0#策略网络log标准差最大值
+    log_std_init: float = 0.2#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
 
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.9#GAE参数
     clip_eps: float = 0.1#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.05  # 熵正则化系数
+    entropy_coef: float = 0.01  # 熵正则化系数
 
     actor_lr0: float = 3e-4  # 策略网络学习率
     critic_lr0: float = 3e-4  # 价值网络学习率
@@ -70,7 +70,7 @@ class TrainingConfig:
     # level0中PPO 训练框架的参数
 
     ppo_epochs: int = 4 #每批数据训练多少次
-    ppo_update_interval: int = 50 #收集多少回合再进行训练
+    ppo_update_interval: int = 5 #收集多少回合再进行训练
     critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
     mini_batch_size = 1024
 
@@ -104,7 +104,7 @@ class TrainingConfig:
     curriculum_level: int = 0#课程学习初始等级
 
     # 训练流程
-    total_episodes: int = 2000
+    total_episodes: int = 20000
     log_interval: int = 10#日志间隔
     save_interval: int = 50#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
@@ -889,7 +889,7 @@ class PPOTrainerWithAllocator:
 
         # 训练结束
         elapsed = time.time() - start_time
-        env.close()
+        self.env.close()
         print(f"\n训练完成! 耗时: {elapsed:.1f}秒")
         print(f"平均奖励: {np.mean(terminal_rewards):.2f}")
         print(f"最高奖励: {np.max(terminal_rewards):.2f}")

@@ -32,15 +32,16 @@ class EnvCurriculumParams:
     dense_reward: bool = True#是否使用密集奖励模式
 
 CURRICULUM_PRESETS = {
-    0: EnvCurriculumParams(target_range=0.10, success_threshold=0.08,obj_range=0.07,max_episode_steps=80),
-    1: EnvCurriculumParams(target_range=0.10, success_threshold=0.07,obj_range=0.09,max_episode_steps=80),
-    2: EnvCurriculumParams(target_range=0.12, success_threshold=0.06,obj_range=0.12,max_episode_steps=80),
+    0: EnvCurriculumParams(target_range=0.10, success_threshold=0.10,obj_range=0.10,max_episode_steps=80),
+    1: EnvCurriculumParams(target_range=0.11, success_threshold=0.09,obj_range=0.11,max_episode_steps=80),
+    2: EnvCurriculumParams(target_range=0.13, success_threshold=0.07,obj_range=0.13,max_episode_steps=80),
     3: EnvCurriculumParams(target_range=0.15, success_threshold=0.05,obj_range=0.15,max_episode_steps=80),
 }
 
 # ---------------------------------------------------------------------------
 # 2. 奖励计算
 # ---------------------------------------------------------------------------
+
 #密集奖励函数
 def compute_step_reward(
     prev_dist: float,
@@ -50,12 +51,12 @@ def compute_step_reward(
 
     if cur_dist < threshold:
         # 已到达目标区域：恒定保持奖励（区内微小位移不计 Δd）
-        return 1.0 + 1.5
+        return 0.3 + 1.5
 
     delta_push = prev_dist - cur_dist
-    r_push = np.tanh(80.0 * delta_push if delta_push >= 0 else 10.0 * delta_push)
+    r_push = np.tanh( 200.0 * delta_push if delta_push >= 0 else 10.0 * delta_push)
 
-    return 1.0 + r_push
+    return 0.3 + r_push
 
 #最终奖励
 def compute_terminal_reward(
