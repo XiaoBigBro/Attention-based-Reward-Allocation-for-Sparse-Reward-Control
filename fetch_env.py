@@ -28,14 +28,14 @@ class EnvCurriculumParams:
     obj_range :float = 0.06 #物块出生地的范围大小
     success_threshold: float = 0.08  #成功判定距离
     target_range: float = 0.10#目标区出生地的范围大小
-    max_episode_steps: int = 80#最大回合步数
+    max_episode_steps: int = 100#最大回合步数
     dense_reward: bool = True#是否使用密集奖励模式
 
 CURRICULUM_PRESETS = {
-    0: EnvCurriculumParams(target_range=0.10, success_threshold=0.10,obj_range=0.10,max_episode_steps=80),
-    1: EnvCurriculumParams(target_range=0.11, success_threshold=0.09,obj_range=0.11,max_episode_steps=80),
-    2: EnvCurriculumParams(target_range=0.13, success_threshold=0.07,obj_range=0.13,max_episode_steps=80),
-    3: EnvCurriculumParams(target_range=0.15, success_threshold=0.05,obj_range=0.15,max_episode_steps=80),
+    0: EnvCurriculumParams(target_range=0.10, success_threshold=0.10,obj_range=0.10,max_episode_steps=100),
+    1: EnvCurriculumParams(target_range=0.11, success_threshold=0.09,obj_range=0.11,max_episode_steps=100),
+    2: EnvCurriculumParams(target_range=0.13, success_threshold=0.07,obj_range=0.13,max_episode_steps=100),
+    3: EnvCurriculumParams(target_range=0.15, success_threshold=0.05,obj_range=0.15,max_episode_steps=100),
 }
 
 # ---------------------------------------------------------------------------
@@ -46,17 +46,33 @@ CURRICULUM_PRESETS = {
 def compute_step_reward(
     prev_dist: float,
     cur_dist: float,
+    prev_dist_girpper2obj:float,
+    gripper_to_obj :float,
     threshold: float,
 ) -> float:
 
     if cur_dist < threshold:
         # 已到达目标区域：恒定保持奖励（区内微小位移不计 Δd）
-        return 0.3 + 1.5
+        return 3.0
 
+    #推动奖励
     delta_push = prev_dist - cur_dist
-    r_push = np.tanh( 200.0 * delta_push if delta_push >= 0 else 10.0 * delta_push)
+    r_push = np.tanh( 100.0 * delta_push if delta_push >= 0 else 5.0 * delta_push)
 
-    return 0.3 + r_push
+    #靠近奖励
+    if gripper_to_obj > 0.08:
+        delta_approach = prev_dist_girpper2obj - gripper_to_obj
+        r_approach = 0.5 * np.tanh(50.0*delta_approach)
+    else:
+        r_approach = 0
+
+    #接触奖励
+    if gripper_to_obj < 0.06:
+        r_contact = 0.3
+    else:
+        r_contact = 0
+
+    return 0.7 + r_push +r_contact +r_approach
 
 #最终奖励
 def compute_terminal_reward(
@@ -95,6 +111,7 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         self._episode_step: int = 0#当前回合的步数
         self._step_rewards: list[float] = []  # 存储每步的即时奖励
         self._prev_dist: Optional[float] = None  # 上一步末端到目标的距离（增量式奖励用）
+        self._prev_dist_girpper2onj: Optional[float] = None
 
         # 同步 target_range 到底层 env（供 _sample_goal 使用）
         self._sync_target_range()#同步 target_range 到底层 env（供 _sample_goal 使用）
@@ -144,6 +161,7 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         self._episode_step = 0
         self._step_rewards = []
         self._prev_dist = None
+        self._prev_dist_girpper2onj = None
 
     # ------------------------------------------------------------------
     # gym.Wrapper 覆写
@@ -158,6 +176,7 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         achieved = obs["achieved_goal"]
         desired = obs["desired_goal"]
         self._prev_dist = float(np.linalg.norm(achieved - desired))
+        self._prev_dist_girpper2onj = float(np.linalg.norm(obs["observation"][6:9]))
 
         while np.linalg.norm(achieved - desired) < self._params.success_threshold:
             obs, info = self.env.reset(**kwargs)
@@ -174,17 +193,21 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         obs, _, terminated, truncated, info = self.env.step(action)
 
         # 计算当前末端到目标的距离
-        achieved = obs["achieved_goal"]
-        desired = obs["desired_goal"]
+        achieved = obs["achieved_goal"]#物块位置
+        desired = obs["desired_goal"]#目标区域位置
+        gripper_to_obj = float(np.linalg.norm(obs["observation"][6:9]))#机械臂与物块的距离
         cur_dist = float(np.linalg.norm(achieved - desired))
 
         # 增量式密集奖励：区内恒定 / 区外增量推进
         step_reward = compute_step_reward(
-            prev_dist=self._prev_dist,
-            cur_dist=cur_dist,
-            threshold = self._params.success_threshold,
+            prev_dist=self._prev_dist,#上次物块与目标区域的距离
+            cur_dist=cur_dist,#这次物块与目标区域的距离
+            prev_dist_girpper2obj = self._prev_dist_girpper2onj,#上次机械臂与物块的距离
+            gripper_to_obj = gripper_to_obj,#这次机械臂与物块的距离
+            threshold = self._params.success_threshold,#判定成功的范围
         )
         self._prev_dist = cur_dist
+        self._prev_dist_girpper2onj = gripper_to_obj
 
         # 存储即时奖励
         self._step_rewards.append(step_reward)
