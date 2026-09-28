@@ -32,7 +32,7 @@ class EnvCurriculumParams:
     dense_reward: bool = True#是否使用密集奖励模式
 
 CURRICULUM_PRESETS = {
-    0: EnvCurriculumParams(target_range=0.10, success_threshold=0.10,obj_range=0.08,max_episode_steps=100),
+    0: EnvCurriculumParams(target_range=0.08, success_threshold=0.10,obj_range=0.08,max_episode_steps=100),
     1: EnvCurriculumParams(target_range=0.11, success_threshold=0.09,obj_range=0.10,max_episode_steps=100),
     2: EnvCurriculumParams(target_range=0.13, success_threshold=0.07,obj_range=0.12,max_episode_steps=100),
     3: EnvCurriculumParams(target_range=0.15, success_threshold=0.05,obj_range=0.15,max_episode_steps=100),
