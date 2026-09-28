@@ -51,8 +51,8 @@ class TrainingConfig:
     clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
     entropy_coef: float = 0.01  # 熵正则化系数
 
-    actor_lr0: float = 1e-4  # 策略网络学习率
-    critic_lr0: float = 1e-4  # 价值网络学习率
+    actor_lr0: float = 3e-4  # 策略网络学习率
+    critic_lr0: float = 3e-4  # 价值网络学习率
 
     actor_lr1: float = 1e-4#课程学习等级1的策略网络学习率
     critic_lr1: float = 1e-4#课程学习等级1的价值网络学习率
@@ -80,7 +80,7 @@ class TrainingConfig:
     alloc_num_layers: int = 2#奖励分配网络层数
     alloc_d_ff: int = 128#奖励分配网络前馈网络隐藏层维度，如果分配网络学得慢，可以调大
     alloc_dropout: float = 0.2#奖励分配网络dropout率
-    max_seq_len: int = 110#奖励分配网络最大序列长度
+    max_seq_len: int = 100#奖励分配网络最大序列长度
 
     # 分配网络level0模仿训练参数
     temperature: float = 0.7#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）。
