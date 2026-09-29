@@ -37,7 +37,7 @@ def load_and_demo():
     print("=== 模型演示加载 ===")
     
     # 1. 指定保存的检查点路径
-    save_path = "checkpoints/seed42/checkpoint_3200.pt"  # 使用您项目中已保存的检查点
+    save_path = "checkpoints/seed57/checkpoint_3000.pt"  # 使用您项目中已保存的检查点
 
     # 2. 加载保存的检查点
     print(f"正在加载模型: {save_path}")
@@ -97,11 +97,11 @@ def load_and_demo():
             obs_tensor = torch.FloatTensor(obs).unsqueeze(0)
             with torch.no_grad():
                 action, log_prob,log_std, mean = network.get_action(obs_tensor)
-                # action = action.squeeze(0).numpy()
-                action_deterministic = torch.tanh(mean).squeeze(0).cpu().numpy()
+                action = action.squeeze(0).numpy()
+                # action_deterministic = torch.tanh(mean).squeeze(0).cpu().numpy()
 
             # 10. 执行动作
-            next_obs, terminated, truncated, info = env.step(action_deterministic)
+            next_obs, terminated, truncated, info = env.step(action)
             next_obs = unpack_obs(next_obs)
 
             # 检查结束

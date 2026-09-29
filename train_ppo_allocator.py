@@ -27,6 +27,40 @@ from ppo import (
 from reward_allocator import RewardAllocatorAgent, RewardAllocatorConfig
 
 
+#更改环境库里面物块生成区域采样的阈值
+from gymnasium_robotics.envs.fetch.fetch_env import MujocoFetchEnv
+
+def _patched_reset_sim(self):
+    # Reset buffers for joint states, actuators, warm-start, control buffers etc.
+    self._mujoco.mj_resetData(self.model, self.data)
+
+    self.data.time = self.initial_time
+    self.data.qpos[:] = np.copy(self.initial_qpos)
+    self.data.qvel[:] = np.copy(self.initial_qvel)
+    if self.model.na != 0:
+        self.data.act[:] = None
+
+    # Randomize start position of object.
+    if self.has_object:
+        object_xpos = self.initial_gripper_xpos[:2]
+        while np.linalg.norm(object_xpos - self.initial_gripper_xpos[:2]) < 0.08:  # 原值0.10
+            object_xpos = self.initial_gripper_xpos[:2] + self.np_random.uniform(
+                -self.obj_range, self.obj_range, size=2
+            )
+        object_qpos = self._utils.get_joint_qpos(
+            self.model, self.data, "object0:joint"
+        )
+        assert object_qpos.shape == (7,)
+        object_qpos[:2] = object_xpos
+        self._utils.set_joint_qpos(
+            self.model, self.data, "object0:joint", object_qpos
+        )
+
+    self._mujoco.mj_forward(self.model, self.data)
+    return True
+
+MujocoFetchEnv._reset_sim = _patched_reset_sim
+
 # =============================================================================
 # 1. 统一配置 - 所有可调参数集中于此
 # =============================================================================
@@ -42,14 +76,14 @@ class TrainingConfig:
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 1.0#策略网络log标准差最大值
-    log_std_init: float = 0.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = 0.2#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
 
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.9#GAE参数
-    clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.01  # 熵正则化系数
+    clip_eps: float = 0.1#PPO裁剪参数,控制策略更新的稳定性.
+    entropy_coef: float = 0.02  # 熵正则化系数
 
     actor_lr0: float = 3e-4  # 策略网络学习率
     critic_lr0: float = 3e-4  # 价值网络学习率
@@ -160,12 +194,19 @@ class PPOTrainerWithAllocator:
         # 创建设备
         self.device = torch.device(config.device)
         print(f"设备: device={self.device}")
-        
+
+        print("[1/5] 初始化环境...")
+        self.env = make_fetch_env(
+            env_id=config.env_id,
+            curriculum_level=config.curriculum_level,
+        )
+        self.curriculum_level = self.env._curriculum_level  # 课程学习等级
+
         # 自动查询环境维度（不创建渲染窗口）
         obs_dim = get_env_obs_dim(config.env_id)
         action_dim = get_env_action_dim(config.env_id)
 
-        print("\n[1/5] 初始化 PPO 网络...")
+        print("\n[2/5] 初始化 PPO 网络...")
         self.network = PPONetwork(
             obs_dim=obs_dim,
             action_dim=action_dim,
@@ -185,7 +226,7 @@ class PPOTrainerWithAllocator:
             lr=config.critic_lr0,
         )
 
-        print("[2/5] 初始化奖励分配网络...")
+        print("[3/5] 初始化奖励分配网络...")
         alloc_config = RewardAllocatorConfig(
             obs_dim=obs_dim,
             action_dim=action_dim,
@@ -198,13 +239,6 @@ class PPOTrainerWithAllocator:
             max_seq_len=config.max_seq_len,
         )
         self.allocator_agent = RewardAllocatorAgent(alloc_config, str(self.device))
-
-        print("[3/5] 初始化环境...")
-        self.env = make_fetch_env(
-            env_id=config.env_id,
-            curriculum_level=config.curriculum_level, 
-        )
-        self.curriculum_level = self.env._curriculum_level#课程学习等级
 
         print("[4/5] 初始化课程学习管理器...")
         self.curriculum_manager = AdaptiveCurriculumManager(
