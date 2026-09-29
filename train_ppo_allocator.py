@@ -76,14 +76,14 @@ class TrainingConfig:
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 1.0#策略网络log标准差最大值
-    log_std_init: float = 0.2#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = 0.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
 
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.9#GAE参数
     clip_eps: float = 0.1#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.02  # 熵正则化系数
+    entropy_coef: float = 0.05  # 熵正则化系数
 
     actor_lr0: float = 3e-4  # 策略网络学习率
     critic_lr0: float = 3e-4  # 价值网络学习率
