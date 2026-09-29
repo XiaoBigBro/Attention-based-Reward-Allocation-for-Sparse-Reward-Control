@@ -31,7 +31,7 @@ class EnvCurriculumParams:
     dense_reward: bool = True#是否使用密集奖励模式
 
 CURRICULUM_PRESETS = {
-    0: EnvCurriculumParams(target_range=0.11, success_threshold=0.10,obj_range=0.10,max_episode_steps=80),
+    0: EnvCurriculumParams(target_range=0.11, success_threshold=0.10,obj_range=0.08,max_episode_steps=80),
     1: EnvCurriculumParams(target_range=0.12, success_threshold=0.09,obj_range=0.10,max_episode_steps=80),
     2: EnvCurriculumParams(target_range=0.13, success_threshold=0.07,obj_range=0.12,max_episode_steps=80),
     3: EnvCurriculumParams(target_range=0.15, success_threshold=0.05,obj_range=0.15,max_episode_steps=80),
@@ -56,7 +56,7 @@ def compute_step_reward(
 
     #推动奖励
     delta_push = prev_dist - cur_dist
-    r_push = np.tanh( 200.0 * delta_push if delta_push >= 0 else 10.0 * delta_push)
+    r_push = np.tanh( 200.0 * delta_push if delta_push >= 0 else 20.0 * delta_push)
 
     #靠近奖励
     if gripper_to_obj > 0.08:

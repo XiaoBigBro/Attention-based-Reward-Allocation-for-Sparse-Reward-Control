@@ -43,7 +43,7 @@ def _patched_reset_sim(self):
     # Randomize start position of object.
     if self.has_object:
         object_xpos = self.initial_gripper_xpos[:2]
-        while np.linalg.norm(object_xpos - self.initial_gripper_xpos[:2]) < 0.08:  # 原值0.10
+        while np.linalg.norm(object_xpos - self.initial_gripper_xpos[:2]) < 0.06:  # 原值0.10
             object_xpos = self.initial_gripper_xpos[:2] + self.np_random.uniform(
                 -self.obj_range, self.obj_range, size=2
             )
