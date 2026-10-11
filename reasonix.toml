@@ -1,2 +1,0 @@
-[permissions]
-allow = ["Bash(D:\\xiao\\anaconda\\envs\\drl\\python.exe --version 2>$null)"]
