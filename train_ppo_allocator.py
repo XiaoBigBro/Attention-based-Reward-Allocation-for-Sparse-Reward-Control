@@ -83,7 +83,7 @@ class TrainingConfig:
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.9#GAE参数
     clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.005  # 熵正则化系数
+    entropy_coef: float = 0.001  # 熵正则化系数
 
     actor_lr0: float = 1e-4  # 策略网络学习率
     critic_lr0: float = 1e-4  # 价值网络学习率
@@ -104,7 +104,7 @@ class TrainingConfig:
     # level0中PPO 训练框架的参数
 
     ppo_epochs: int = 4 #每批数据训练多少次
-    ppo_update_interval: int = 10 #收集多少回合再进行训练，现在每回合的时间步为100
+    ppo_update_interval: int = 50 #收集多少回合再进行训练，现在每回合的时间步为100
     critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
     mini_batch_size = 256
 
@@ -433,6 +433,7 @@ class PPOTrainerWithAllocator:
         returns = torch.FloatTensor(train_buffer.returns).to(self.device)
 
         # 标准化优势
+        returns = (returns - returns.mean()) / (returns.std() + 1e-8)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # 累计多 epoch 的损失

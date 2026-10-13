@@ -61,16 +61,16 @@ def compute_step_reward(
     r_push = np.tanh( 150.0 * delta_push if delta_push >= 0 else 15.0 * delta_push)
 
     #靠近奖励
-    if gripper_to_obj > 0.12:
+    if gripper_to_obj > 0.09:
         delta_approach = prev_dist_girpper2obj - gripper_to_obj
         r_approach = 0.3 * np.tanh(50.0*delta_approach)
     else:
         r_approach = 0
 
     # 接触奖励：夹爪贴到按钮上
-    r_contact = 0.2 if gripper_to_obj < 0.09 else 0.0
+    r_contact = 0.2 if gripper_to_obj < 0.08 else 0.0
 
-    return 0.2 + r_push +r_approach + r_contact
+    return 0.3 + r_push +r_approach + r_contact
 
 #最终奖励
 def compute_terminal_reward(
