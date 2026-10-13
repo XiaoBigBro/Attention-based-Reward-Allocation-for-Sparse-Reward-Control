@@ -16,7 +16,8 @@ import torch.optim as optim
 from tqdm import tqdm
 
 from curriculum import AdaptiveCurriculumManager
-from fetch_env import make_fetch_env, get_env_obs_dim, get_env_action_dim
+from buttonpress_env import make_buttonpress_env, get_env_obs_dim, get_env_action_dim
+
 from ppo import (
     PPONetwork,
     RawTrajectoryBuffer,
@@ -25,7 +26,6 @@ from ppo import (
     unpack_obs,
 )
 from reward_allocator import RewardAllocatorAgent, RewardAllocatorConfig
-
 
 #更改环境库里面物块生成区域采样的阈值
 from gymnasium_robotics.envs.fetch.fetch_env import MujocoFetchEnv
@@ -43,7 +43,7 @@ def _patched_reset_sim(self):
     # Randomize start position of object.
     if self.has_object:
         object_xpos = self.initial_gripper_xpos[:2]
-        while np.linalg.norm(object_xpos - self.initial_gripper_xpos[:2]) < 0.06:  # 原值0.10
+        while np.linalg.norm(object_xpos - self.initial_gripper_xpos[:2]) < 0.10:  # 原值0.10
             object_xpos = self.initial_gripper_xpos[:2] + self.np_random.uniform(
                 -self.obj_range, self.obj_range, size=2
             )
@@ -69,24 +69,24 @@ MujocoFetchEnv._reset_sim = _patched_reset_sim
 class TrainingConfig:
     """训练配置：包含所有可调超参数，供 PPOTrainerWithAllocator 使用"""
     # 环境
-    env_id: str = "FetchPush-v4"
+    env_id: str = "button-press-v3"
     seed: int = 888
 
     # PPO actor网络参数
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 1.0#策略网络log标准差最大值
-    log_std_init: float = 0.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = 0.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
 
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.9#GAE参数
-    clip_eps: float = 0.1#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.05  # 熵正则化系数
+    clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
+    entropy_coef: float = 0.005  # 熵正则化系数
 
-    actor_lr0: float = 3e-4  # 策略网络学习率
-    critic_lr0: float = 3e-4  # 价值网络学习率
+    actor_lr0: float = 1e-4  # 策略网络学习率
+    critic_lr0: float = 1e-4  # 价值网络学习率
 
     actor_lr1: float = 1e-4#课程学习等级1的策略网络学习率
     critic_lr1: float = 1e-4#课程学习等级1的价值网络学习率
@@ -104,9 +104,9 @@ class TrainingConfig:
     # level0中PPO 训练框架的参数
 
     ppo_epochs: int = 4 #每批数据训练多少次
-    ppo_update_interval: int = 50 #收集多少回合再进行训练
+    ppo_update_interval: int = 10 #收集多少回合再进行训练，现在每回合的时间步为100
     critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
-    mini_batch_size = 1024
+    mini_batch_size = 256
 
     # 奖励分配网络初始化超参数
     alloc_d_model: int = 64#奖励分配网络隐藏层维度
@@ -140,7 +140,7 @@ class TrainingConfig:
     # 训练流程
     total_episodes: int = 50000
     log_interval: int = 10#日志间隔
-    save_interval: int = 200#保存间隔
+    save_interval: int = 500#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
     device: str = "cuda" if torch.cuda.is_available() else "cpu"  # 设备（自动检测）
 
@@ -196,7 +196,7 @@ class PPOTrainerWithAllocator:
         print(f"设备: device={self.device}")
 
         print("[1/5] 初始化环境...")
-        self.env = make_fetch_env(
+        self.env = make_buttonpress_env(
             env_id=config.env_id,
             curriculum_level=config.curriculum_level,
         )
@@ -676,9 +676,9 @@ class PPOTrainerWithAllocator:
 
             train_buffers_list = []  # 存放多个 TrainingBuffer
             total = 0.0
-            self.network.eval()
+            self.network.eval()#ppo网络进入评估模式
 
-            for i in range(self.config.ppo_update_interval):#采集ppo_update_interval个回合，目前是50
+            for i in range(self.config.ppo_update_interval):#采集ppo_update_interval个回合，目前是20
 
                 # 1. 采集轨迹
                 raw_buffer = self.collect_trajectory()
@@ -941,7 +941,6 @@ class PPOTrainerWithAllocator:
                 "current_level": self.curriculum_manager.current_level,
                 "episode_count": self.curriculum_manager.episode_count,
                 "cooldown_remaining": self.curriculum_manager.cooldown_remaining,
-                "since_last_change": self.curriculum_manager.since_last_change,
                 "reward_buffer": list(self.curriculum_manager.reward_window._buffer),
                 "level_episode_counts": dict(self.curriculum_manager.level_episode_counts),
             },
@@ -961,7 +960,6 @@ class PPOTrainerWithAllocator:
         self.curriculum_manager.current_level = cs["current_level"]
         self.curriculum_manager.episode_count = cs["episode_count"]
         self.curriculum_manager.cooldown_remaining = cs["cooldown_remaining"]
-        self.curriculum_manager.since_last_change = cs["since_last_change"]
         # 恢复滑动窗口缓冲区
         from collections import deque
         self.curriculum_manager.reward_window._buffer = deque(

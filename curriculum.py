@@ -9,7 +9,7 @@ from typing import Dict
 from collections import deque
 import numpy as np
 
-from fetch_env import NUM_CURRICULUM_LEVELS
+from fetchreach_env import NUM_CURRICULUM_LEVELS
 
 
 # --- SlidingWindowStats ---
@@ -65,8 +65,6 @@ class AdaptiveCurriculumManager:
         self.level_episode_counts: Dict[int, int] = {i: 0 for i in range(NUM_CURRICULUM_LEVELS)}
 
         self.cooldown_remaining: int = self.promote_cooldown
-        self.since_last_change: int = 0
-
         self.reward_window = SlidingWindowStats(window_size)
 
     def on_episode_end(
@@ -76,7 +74,6 @@ class AdaptiveCurriculumManager:
 
         self.episode_count += 1
         self.level_episode_counts[self.current_level] += 1
-        self.since_last_change += 1
 
         if self.cooldown_remaining > 0:
             self.cooldown_remaining -= 1

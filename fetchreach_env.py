@@ -28,7 +28,7 @@ class EnvCurriculumParams:
     success_threshold: float = 0.10  #成功判定距离
     target_range: float = 0.11#目标区出生地的范围大小
     max_episode_steps: int = 80#最大回合步数
-    dense_reward: bool = True#是否使用密集奖励模式
+
 
 CURRICULUM_PRESETS = {
     0: EnvCurriculumParams(target_range=0.11, success_threshold=0.10,obj_range=0.08,max_episode_steps=80),
