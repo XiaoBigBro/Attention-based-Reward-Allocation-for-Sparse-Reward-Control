@@ -83,10 +83,10 @@ class TrainingConfig:
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.9#GAE参数
     clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.001  # 熵正则化系数
+    entropy_coef: float = 0.01  # 熵正则化系数
 
-    actor_lr0: float = 1e-4  # 策略网络学习率
-    critic_lr0: float = 1e-4  # 价值网络学习率
+    actor_lr0: float = 3e-4  # 策略网络学习率
+    critic_lr0: float = 3e-4  # 价值网络学习率
 
     actor_lr1: float = 1e-4#课程学习等级1的策略网络学习率
     critic_lr1: float = 1e-4#课程学习等级1的价值网络学习率
@@ -106,7 +106,7 @@ class TrainingConfig:
     ppo_epochs: int = 4 #每批数据训练多少次
     ppo_update_interval: int = 50 #收集多少回合再进行训练，现在每回合的时间步为100
     critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
-    mini_batch_size = 256
+    mini_batch_size = 512
 
     # 奖励分配网络初始化超参数
     alloc_d_model: int = 64#奖励分配网络隐藏层维度
@@ -114,7 +114,7 @@ class TrainingConfig:
     alloc_num_layers: int = 2#奖励分配网络层数
     alloc_d_ff: int = 128#奖励分配网络前馈网络隐藏层维度，如果分配网络学得慢，可以调大
     alloc_dropout: float = 0.2#奖励分配网络dropout率
-    max_seq_len: int = 100#奖励分配网络最大序列长度
+    max_seq_len: int = 120#奖励分配网络最大序列长度
 
     # 分配网络level0模仿训练参数
     temperature: float = 0.7#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）。
@@ -123,7 +123,7 @@ class TrainingConfig:
     # 1.0 时 target 太平坦（7.4:2.8:1），梯度被 80 维归一化稀释到 1e-5 量级，500 集也推不动。
     imitation_lr: float = 1e-3#模仿训练学习率
     imitation_batch_episodes: int = 512#模仿训练每批回合数（batch 维=回合，一次梯度更新）
-    imitation_epochs: int = 100#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
+    imitation_epochs: int = 100#模仿训练 epoch 数
     imitation_dataset_size: int = 1000#离线训练数据集大小（每 100 次训练时用当前 PPO 现采 N 回合组成固定数据集）
 
     #奖励分配网络level1训练参数
@@ -131,14 +131,14 @@ class TrainingConfig:
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
-    curriculum_promote_threshold: float = 500.0#课程学习提升阈值
+    curriculum_promote_threshold: float = 180.0#课程学习提升阈值
     curriculum_demote_threshold: float = 50.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 200#课程学习提升冷却期
-    curriculum_demote_cooldown: int = 60#课程学习降级冷却期
+    curriculum_promote_cooldown: int = 400#课程学习提升冷却期
+    curriculum_demote_cooldown: int = 100#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
     # 训练流程
-    total_episodes: int = 50000
+    total_episodes: int = 5000
     log_interval: int = 10#日志间隔
     save_interval: int = 500#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
@@ -577,7 +577,7 @@ class PPOTrainerWithAllocator:
         # ---------- 2~4. 多 epoch mini-batch 训练 ----------
         total_kl, total_mse, total_steps = 0.0, 0.0, 0
 
-        while epoch < self.config.imitation_epochs*3 :
+        while epoch < self.config.imitation_epochs*3 :#乘3为了防止模仿训练一直没完成而卡死在里面，硬性加一个结束条件。
 
             self.allocator_agent.network.train()
             order = np.random.permutation(n_train)  # 每 epoch 重新打乱
