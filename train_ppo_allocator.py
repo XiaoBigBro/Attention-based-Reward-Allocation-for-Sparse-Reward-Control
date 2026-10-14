@@ -76,25 +76,25 @@ class TrainingConfig:
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 1.0#策略网络log标准差最大值
-    log_std_init: float = 0.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = 0.1#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
 
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.9#GAE参数
     clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.01  # 熵正则化系数
+    entropy_coef: float = 0.05  # 熵正则化系数
 
-    actor_lr0: float = 3e-4  # 策略网络学习率
+    actor_lr0: float = 1e-3  # 策略网络学习率
     critic_lr0: float = 3e-4  # 价值网络学习率
 
-    actor_lr1: float = 1e-4#课程学习等级1的策略网络学习率
+    actor_lr1: float = 3e-4#课程学习等级1的策略网络学习率
     critic_lr1: float = 1e-4#课程学习等级1的价值网络学习率
 
-    actor_lr2: float = 1e-4  # 课程学习等级2的策略网络学习率
+    actor_lr2: float = 3e-4  # 课程学习等级2的策略网络学习率
     critic_lr2: float = 1e-4  # 课程学习等级2的价值网络学习率
 
-    actor_lr3: float = 1e-4  # 课程学习等级3的策略网络学习率
+    actor_lr3: float = 3e-4  # 课程学习等级3的策略网络学习率
     critic_lr3: float = 1e-4  # 课程学习等级3的价值网络学习率
 
     max_grad_norm: float = 0.5  # 最大梯度范数，防止梯度爆炸
@@ -123,7 +123,7 @@ class TrainingConfig:
     # 1.0 时 target 太平坦（7.4:2.8:1），梯度被 80 维归一化稀释到 1e-5 量级，500 集也推不动。
     imitation_lr: float = 1e-3#模仿训练学习率
     imitation_batch_episodes: int = 512#模仿训练每批回合数（batch 维=回合，一次梯度更新）
-    imitation_epochs: int = 100#模仿训练 epoch 数
+    imitation_epochs: int = 50#模仿训练 epoch 数
 
     #奖励分配网络level1训练参数
     alloc_lr1: float = 1e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
@@ -678,7 +678,7 @@ class PPOTrainerWithAllocator:
             total = 0.0
             self.network.eval()#ppo网络进入评估模式
 
-            for i in range(self.config.ppo_update_interval):#采集ppo_update_interval个回合，目前是20
+            for i in range(self.config.ppo_update_interval):#采集ppo_update_interval个回合，目前是50
 
                 # 1. 采集轨迹
                 raw_buffer = self.collect_trajectory()
@@ -813,7 +813,6 @@ class PPOTrainerWithAllocator:
                 for param_group in self.optimizer_critic.param_groups:
                     param_group['lr'] = self.config.critic_lr1
 
-            # 根据课程等级调整学习率
             elif self.curriculum_level == 2:
 
                 self.allocator_agent.network.eval()
