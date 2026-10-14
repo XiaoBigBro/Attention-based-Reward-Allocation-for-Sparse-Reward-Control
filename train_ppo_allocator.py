@@ -76,7 +76,7 @@ class TrainingConfig:
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 1.0#策略网络log标准差最大值
-    log_std_init: float = 0.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = 0.2#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
 
@@ -123,7 +123,7 @@ class TrainingConfig:
     # 1.0 时 target 太平坦（7.4:2.8:1），梯度被 80 维归一化稀释到 1e-5 量级，500 集也推不动。
     imitation_lr: float = 1e-3#模仿训练学习率
     imitation_batch_episodes: int = 512#模仿训练每批回合数（batch 维=回合，一次梯度更新）
-    imitation_epochs: int = 50#模仿训练 epoch 数
+    imitation_epochs: int = 100#模仿训练 epoch 数
 
     #奖励分配网络level1训练参数
     alloc_lr1: float = 1e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
@@ -633,7 +633,7 @@ class PPOTrainerWithAllocator:
             print(f"Epoch {epoch}/{self.config.imitation_epochs}: "
                   f"mse={total_mse/total_steps:.4f}, corr={w_rew_corr:.4f}")
 
-            if epoch >= self.config.imitation_epochs and w_rew_corr > 0.85:
+            if epoch >= self.config.imitation_epochs and w_rew_corr > 0.90:
                 print(f"✅ 训练完成：epoch={epoch}, corr={w_rew_corr:.4f}")
                 break
 
