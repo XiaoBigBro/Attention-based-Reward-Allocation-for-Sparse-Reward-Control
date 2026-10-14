@@ -53,6 +53,7 @@ def compute_step_reward(
 
     # 已按到位：按得越深，奖励越高
     if cur_dist < threshold:
+
         depth_ratio = 1.0 - cur_dist / threshold  # 0~1
         return 2.0 + depth_ratio  # 2.0 ~ 3.0
 

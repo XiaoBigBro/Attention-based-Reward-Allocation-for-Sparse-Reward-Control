@@ -124,16 +124,15 @@ class TrainingConfig:
     imitation_lr: float = 1e-3#模仿训练学习率
     imitation_batch_episodes: int = 512#模仿训练每批回合数（batch 维=回合，一次梯度更新）
     imitation_epochs: int = 100#模仿训练 epoch 数
-    imitation_dataset_size: int = 1000#离线训练数据集大小（每 100 次训练时用当前 PPO 现采 N 回合组成固定数据集）
 
     #奖励分配网络level1训练参数
     alloc_lr1: float = 1e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
-    curriculum_promote_threshold: float = 180.0#课程学习提升阈值
+    curriculum_promote_threshold: float = 200.0#课程学习提升阈值
     curriculum_demote_threshold: float = 50.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 400#课程学习提升冷却期
+    curriculum_promote_cooldown: int = 200#课程学习提升冷却期
     curriculum_demote_cooldown: int = 100#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
