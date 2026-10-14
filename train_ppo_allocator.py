@@ -83,9 +83,9 @@ class TrainingConfig:
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.9#GAE参数
     clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.001  # 熵正则化系数
+    entropy_coef: float = 0.01  # 熵正则化系数
 
-    actor_lr0: float = 3e-4  # 策略网络学习率
+    actor_lr0: float = 1e-3  # 策略网络学习率
     critic_lr0: float = 3e-4  # 价值网络学习率
 
     actor_lr1: float = 3e-4#课程学习等级1的策略网络学习率
