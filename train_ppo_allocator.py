@@ -16,7 +16,7 @@ import torch.optim as optim
 from tqdm import tqdm
 
 from curriculum import AdaptiveCurriculumManager
-from buttonpress_env import make_buttonpress_env, get_env_obs_dim, get_env_action_dim
+from opendoor_env import make_opendoor_env, get_env_obs_dim, get_env_action_dim
 
 from ppo import (
     PPONetwork,
@@ -69,14 +69,14 @@ MujocoFetchEnv._reset_sim = _patched_reset_sim
 class TrainingConfig:
     """训练配置：包含所有可调超参数，供 PPOTrainerWithAllocator 使用"""
     # 环境
-    env_id: str = "button-press-v3"
+    env_id: str = "door-open-v3"
     seed: int = 888
 
     # PPO actor网络参数
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 1.0#策略网络log标准差最大值
-    log_std_init: float = 0.2#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = 0.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
 
@@ -104,7 +104,7 @@ class TrainingConfig:
     # level0中PPO 训练框架的参数
 
     ppo_epochs: int = 4 #每批数据训练多少次
-    ppo_update_interval: int = 50 #收集多少回合再进行训练，现在每回合的时间步为100
+    ppo_update_interval: int = 30 #收集多少回合再进行训练，现在每回合的时间步为100
     critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
     mini_batch_size = 512
 
@@ -114,7 +114,7 @@ class TrainingConfig:
     alloc_num_layers: int = 2#奖励分配网络层数
     alloc_d_ff: int = 128#奖励分配网络前馈网络隐藏层维度，如果分配网络学得慢，可以调大
     alloc_dropout: float = 0.2#奖励分配网络dropout率
-    max_seq_len: int = 120#奖励分配网络最大序列长度
+    max_seq_len: int = 210#奖励分配网络最大序列长度
 
     # 分配网络level0模仿训练参数
     temperature: float = 0.7#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）。
@@ -195,7 +195,7 @@ class PPOTrainerWithAllocator:
         print(f"设备: device={self.device}")
 
         print("[1/5] 初始化环境...")
-        self.env = make_buttonpress_env(
+        self.env = make_opendoor_env(
             env_id=config.env_id,
             curriculum_level=config.curriculum_level,
         )
