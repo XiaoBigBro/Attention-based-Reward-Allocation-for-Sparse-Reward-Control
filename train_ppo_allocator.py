@@ -106,7 +106,7 @@ class TrainingConfig:
     ppo_epochs: int = 4 #每批数据训练多少次
     ppo_update_interval: int = 30 #收集多少回合再进行训练，现在每回合的时间步为100
     critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
-    mini_batch_size = 1024
+    mini_batch_size = 512
 
     # 奖励分配网络初始化超参数
     alloc_d_model: int = 64#奖励分配网络隐藏层维度
@@ -122,7 +122,7 @@ class TrainingConfig:
     # 0.5 时 target 为"保持>推进>后退"（约 148:20:2.7），可学且梯度足够强（比 1.0 强约 10 倍）；
     # 1.0 时 target 太平坦（7.4:2.8:1），梯度被 80 维归一化稀释到 1e-5 量级，500 集也推不动。
     imitation_lr: float = 1e-3#模仿训练学习率
-    imitation_batch_episodes: int = 512#模仿训练每批回合数（batch 维=回合，一次梯度更新）
+    imitation_batch_episodes: int = 128#模仿训练每批回合数（batch 维=回合，一次梯度更新）
     imitation_epochs: int = 100#模仿训练 epoch 数
 
     #奖励分配网络level1训练参数
