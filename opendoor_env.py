@@ -43,7 +43,7 @@ class EnvCurriculumParams:
     max_episode_steps: int = 200      #最大回合步数
 
 CURRICULUM_PRESETS = {
-    0: EnvCurriculumParams(door_x_range=0.010, door_y_range=0.010, success_threshold=0.35, max_episode_steps=200),
+    0: EnvCurriculumParams(door_x_range=0.010, door_y_range=0.010, success_threshold=0.45, max_episode_steps=200),
     1: EnvCurriculumParams(door_x_range=0.025, door_y_range=0.025, success_threshold=0.25, max_episode_steps=200),
     2: EnvCurriculumParams(door_x_range=0.040, door_y_range=0.040, success_threshold=0.15, max_episode_steps=200),
     3: EnvCurriculumParams(door_x_range=0.050, door_y_range=0.050, success_threshold=0.06, max_episode_steps=200),
@@ -81,7 +81,7 @@ def compute_step_reward(
 
     #就位奖励：越靠近"把手与门板之间"的就位点越高（0.06 以内给满；权重远小于 dwell，
     #避免"贴着把手不动"也能刷分）。实测：专家拉动时到就位点 0.046，天真直冲策略最小 0.082
-    r_inplace = 0.8 * max(0.0, 1.0 - gripper_to_obj / 0.06)
+    r_inplace = 0.8 * max(0.0, 1.0 - gripper_to_obj / 0.20)
 
     #（原"接触奖励"项已删除：实测 176/200 步都触发、退化成第二个常数奖励，作用已被靠近项覆盖）
     return 0.3 + r_pull + r_approach + r_inplace
