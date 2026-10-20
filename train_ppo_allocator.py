@@ -104,7 +104,7 @@ class TrainingConfig:
     # level0中PPO 训练框架的参数
 
     ppo_epochs: int = 4 #每批数据训练多少次
-    ppo_update_interval: int = 50 #收集多少回合再进行训练，现在每回合的时间步为100
+    ppo_update_interval: int = 20 #收集多少回合再进行训练，现在每回合的时间步为100
     critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
     mini_batch_size = 512
 
@@ -130,14 +130,14 @@ class TrainingConfig:
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
-    curriculum_promote_threshold: float = 700.0#课程学习提升阈值
+    curriculum_promote_threshold: float = 380.0#课程学习提升阈值
     curriculum_demote_threshold: float = 50.0#课程学习降级阈值
     curriculum_promote_cooldown: int = 200#课程学习提升冷却期
     curriculum_demote_cooldown: int = 100#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
     # 训练流程
-    total_episodes: int = 30000
+    total_episodes: int = 10000
     log_interval: int = 10#日志间隔
     save_interval: int = 500#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
