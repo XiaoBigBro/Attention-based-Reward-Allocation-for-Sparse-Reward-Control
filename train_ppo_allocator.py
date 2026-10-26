@@ -83,7 +83,7 @@ class TrainingConfig:
     gamma: float = 0.99# 折扣因子,控制未来奖励的权重
     lam: float = 0.95#GAE参数
     clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.005  # 熵正则化系数
+    entropy_coef: float = 0.001  # 熵正则化系数
 
     # 奖励缩放：新奖励下回合回报约 21~208，缩放后落在 O(2~21)，
     # critic 才学得动（不缩放时 smooth_l1 目标量级 200+，收敛极慢）
@@ -134,7 +134,7 @@ class TrainingConfig:
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
-    curriculum_promote_threshold: float = 10000.0#课程学习提升阈值
+    curriculum_promote_threshold: float = 1000.0#课程学习提升阈值
     curriculum_demote_threshold: float = 50.0#课程学习降级阈值
     curriculum_promote_cooldown: int = 200#课程学习提升冷却期
     curriculum_demote_cooldown: int = 100#课程学习降级冷却期
