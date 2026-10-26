@@ -68,23 +68,26 @@ def compute_step_reward(
     threshold: float,
 ) -> float:
 
-    # 已推到位：推得越到位（剩余距离越小），奖励越高
-    if cur_dist <= threshold:
-        depth_ratio = 1.0 - cur_dist / threshold  # 0~1
-        return 2.0 + depth_ratio  # 2.5 ~ 3.5
+    # 1) 接近项：0 ~ 0.3，夹爪靠近把手即得分
+    r_approach = 0.3 * np.clip(1.0 - gripper_to_obj / 0.5, 0.0, 1.0)
 
-    r_approach = 0.3 * np.clip(1.0-(gripper_to_obj/0.5),0.0,1.0)
+    # 2) 进度项：0 ~ 1.0，覆盖整段 0.24 m 行程，每推进 1 cm 都有正收益
+    r_progress = np.clip(1.0 - cur_dist / 0.24, 0.0, 1.0)
 
-    r_pull = np.clip(1.0-(cur_dist/0.2),0.0,1.0)
-
-    combined_reward=r_approach*r_pull
-    r_guide = r_approach + 0.2 * r_pull
-
+    # 3) 推动增量项：推进给正分，回拉给负分（系数不对称，鼓励单向推动）
     delta_pull = prev_dist - cur_dist
+    if delta_pull >= 0:
+        r_push = 0.5 * np.tanh(400.0 * delta_pull)
+    else:
+        r_push = 0.5 * np.tanh(40.0 * delta_pull)
 
-    r_step = np.tanh(50.0 * delta_pull) if delta_pull > 0 else 0.0
+    # 4) 到位加成：0 ~ 0.5，在 threshold 处连续（cur=threshold 时恰为 0）
+    if cur_dist <= threshold:
+        r_inplace = 0.5 * np.clip(1.0 - cur_dist / threshold, 0.0, 1.0)
+    else:
+        r_inplace = 0.0
 
-    return combined_reward + 0.2 * r_step + r_guide
+    return r_approach + r_progress + r_push + r_inplace
 
 
 def compute_terminal_reward(step_rewards: list[float]) -> float:

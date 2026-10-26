@@ -76,7 +76,7 @@ class TrainingConfig:
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 1.0#策略网络log标准差最大值
-    log_std_init: float = 0.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = -1.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
 
@@ -85,7 +85,11 @@ class TrainingConfig:
     clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
     entropy_coef: float = 0.005  # 熵正则化系数
 
-    actor_lr0: float = 1e-4  # 策略网络学习率
+    # 奖励缩放：新奖励下回合回报约 21~208，缩放后落在 O(2~21)，
+    # critic 才学得动（不缩放时 smooth_l1 目标量级 200+，收敛极慢）
+    reward_scale: float = 0.1
+
+    actor_lr0: float = 3e-4  # 策略网络学习率
     critic_lr0: float = 1e-4  # 价值网络学习率
 
     actor_lr1: float = 3e-4#课程学习等级1的策略网络学习率
@@ -375,7 +379,8 @@ class PPOTrainerWithAllocator:
         """计算 GAE 并构建训练缓冲区"""
         # 实际 transition 数 N (observations 有 N+1 个，包含 terminal state)
         N = len(buffer.observations) - 1#长度为N
-        allocated_rewards_list = allocated_rewards.tolist()
+        # 统一在此缩放：L0/L1/L2 三个分支的奖励都经过这里，一处生效
+        allocated_rewards_list = (allocated_rewards * self.config.reward_scale).tolist()
 
         observations = buffer.observations  # 长度 N+1: s_0, ..., s_N
 
@@ -387,7 +392,9 @@ class PPOTrainerWithAllocator:
 
         values = critic_values[:-1]  # 长度 N，取出V(s_0), V(s_1), ..., V(s_{N-1})
         next_values = target_values[1:]  # 长度 N，取出V(s_1), V(s_2), ..., V(s_{N})
-        dones = [False] * (N - 1) + [True]  # 长度 N，最后一步是 terminal
+        # window-open 是固定 200 步截断而非真终止，最后一步必须用 V(s_N) 自举，
+        # 否则 delta_N = r_N − V(s_N) 会把最后 ~30 步的 advantage 全部污染
+        dones = [False] * N  # 长度 N，全程不做终止截断
 
         # 计算 GAE（所有输入长度必须一致为 N）
         advantages, returns = compute_gae(
@@ -432,8 +439,8 @@ class PPOTrainerWithAllocator:
         advantages = torch.FloatTensor(train_buffer.advantages).to(self.device)
         returns = torch.FloatTensor(train_buffer.returns).to(self.device)
 
-        # 标准化优势
-        returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+        # 标准化优势（returns 必须保持原始量级：它是 critic 的回归目标，
+        # 且 compute_gae 用 critic 输出做自举，两者一旦不同量级 GAE 就失真）
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # 累计多 epoch 的损失
