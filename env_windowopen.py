@@ -36,7 +36,7 @@ WINDOW_Y_CENTER = 0.8    # 窗体 y 中心（官方采样 y∈[0.7,0.9] 的中�
 WINDOW_Z = 0.16          # 窗体高度（固定，与 XML 一致）
 
 # 就位点相对把手的偏移：窗沿 +x 推开，夹爪须站在把手 −x 侧才能施加推力
-INPLACE_OFFSET = np.array([-0.04, 0.0, 0.0])#原本是np.array([-0.04, 0.0, 0.0])
+# INPLACE_OFFSET = np.array([-0.03, -0.03, 0.0])#原本是np.array([-0.04, 0.0, 0.0])
 
 @dataclass
 class EnvCurriculumParams:
@@ -47,13 +47,13 @@ class EnvCurriculumParams:
     window_y_range: float = 0.01
     window_z: float = WINDOW_Z
     success_threshold: float = 0.12   # 把手与目标的剩余 x 距离阈值：<= 该值视为推到位
-    max_episode_steps: int = 150
+    max_episode_steps: int = 200
 
 CURRICULUM_PRESETS = {
-    0: EnvCurriculumParams(window_x_range=0.010, window_y_range=0.010, success_threshold=0.15, max_episode_steps=150),
-    1: EnvCurriculumParams(window_x_range=0.030, window_y_range=0.030, success_threshold=0.11, max_episode_steps=150),
-    2: EnvCurriculumParams(window_x_range=0.060, window_y_range=0.060, success_threshold=0.08, max_episode_steps=150),
-    3: EnvCurriculumParams(window_x_range=0.100, window_y_range=0.100, success_threshold=0.05, max_episode_steps=150),
+    0: EnvCurriculumParams(window_x_range=0.010, window_y_range=0.010, success_threshold=0.15, max_episode_steps=200),
+    1: EnvCurriculumParams(window_x_range=0.030, window_y_range=0.030, success_threshold=0.11, max_episode_steps=200),
+    2: EnvCurriculumParams(window_x_range=0.060, window_y_range=0.060, success_threshold=0.08, max_episode_steps=200),
+    3: EnvCurriculumParams(window_x_range=0.100, window_y_range=0.100, success_threshold=0.05, max_episode_steps=200),
 }
 
 # ---------------------------------------------------------------------------
@@ -69,27 +69,22 @@ def compute_step_reward(
 ) -> float:
 
     # 已推到位：推得越到位（剩余距离越小），奖励越高
-    if cur_dist < threshold:
+    if cur_dist <= threshold:
         depth_ratio = 1.0 - cur_dist / threshold  # 0~1
-        return 2.5 + depth_ratio  # 2.5 ~ 3.5
+        return 2.0 + depth_ratio  # 2.5 ~ 3.5
 
-    # 推动奖励（把手朝目标方向推进为正，被带回为负）
+    r_approach = 0.3 * np.clip(1.0-(gripper_to_obj/0.5),0.0,1.0)
+
+    r_pull = np.clip(1.0-(cur_dist/0.2),0.0,1.0)
+
+    combined_reward=r_approach*r_pull
+    r_guide = r_approach + 0.2 * r_pull
+
     delta_pull = prev_dist - cur_dist
-    r_pull = np.tanh(150.0 * delta_pull if delta_pull >= 0 else 15.0 * delta_pull)
 
-    # 远处靠近奖励（趋势引导：只在距离还远时计）
-    if gripper_to_obj > 0.09:
-        delta_approach = prev_dist_girpper2obj - gripper_to_obj
-        r_approach = 0.3 * np.tanh(50.0 * delta_approach)
-    else:
-        r_approach = 0
+    r_step = np.tanh(50.0 * delta_pull) if delta_pull > 0 else 0.0
 
-    # 就位奖励：越靠近"把手 −x 侧的就位点"越高
-    r_inplace = 0.7 * max(0.0, 1.0 - gripper_to_obj / 0.20)
-    # # 接触奖励
-    # r_contact = 0.2 if gripper_to_obj < 0.08 else 0.0
-
-    return 0.3 + r_pull + r_approach + r_inplace
+    return combined_reward + 0.2 * r_step + r_guide
 
 
 def compute_terminal_reward(step_rewards: list[float]) -> float:
@@ -188,7 +183,7 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         handle_x = float(obs[4:7][0])
         goal_x = float(obs[36:39][0])
         cur_dist = abs(goal_x - handle_x)
-        inplace_point = obs[4:7] + INPLACE_OFFSET
+        inplace_point = obs[4:7]
         gripper_to_obj = float(np.linalg.norm(obs[0:3] - inplace_point))
         return cur_dist, gripper_to_obj
 

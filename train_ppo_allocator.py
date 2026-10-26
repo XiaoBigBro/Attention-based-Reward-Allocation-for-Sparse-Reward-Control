@@ -76,16 +76,16 @@ class TrainingConfig:
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
     log_std_max: float = 1.0#策略网络log标准差最大值
-    log_std_init: float = 0.2#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_init: float = 0.0#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
 
     gamma: float = 0.99# 折扣因子,控制未来奖励的权重
-    lam: float = 0.9#GAE参数
+    lam: float = 0.95#GAE参数
     clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.01  # 熵正则化系数
+    entropy_coef: float = 0.005  # 熵正则化系数
 
-    actor_lr0: float = 3e-4  # 策略网络学习率
+    actor_lr0: float = 1e-4  # 策略网络学习率
     critic_lr0: float = 1e-4  # 价值网络学习率
 
     actor_lr1: float = 3e-4#课程学习等级1的策略网络学习率
@@ -104,9 +104,9 @@ class TrainingConfig:
     # level0中PPO 训练框架的参数
 
     ppo_epochs: int = 4 #每批数据训练多少次
-    ppo_update_interval: int = 40 #收集多少回合再进行训练，现在每回合的时间步为100
+    ppo_update_interval: int = 50 #收集多少回合再进行训练，现在每回合的时间步为100
     critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
-    mini_batch_size = 512
+    mini_batch_size = 1024
 
     # 奖励分配网络初始化超参数
     alloc_d_model: int = 64#奖励分配网络隐藏层维度
@@ -114,7 +114,7 @@ class TrainingConfig:
     alloc_num_layers: int = 2#奖励分配网络层数
     alloc_d_ff: int = 128#奖励分配网络前馈网络隐藏层维度，如果分配网络学得慢，可以调大
     alloc_dropout: float = 0.2#奖励分配网络dropout率
-    max_seq_len: int = 160#奖励分配网络最大序列长度
+    max_seq_len: int = 210#奖励分配网络最大序列长度
 
     # 分配网络level0模仿训练参数
     temperature: float = 0.7#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）。
