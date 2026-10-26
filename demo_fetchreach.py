@@ -1,7 +1,7 @@
 # demo_load.py
 import torch
 import numpy as np
-from fetchreach_env import make_fetch_env, get_env_obs_dim, get_env_action_dim
+from env_fetchreach import make_fetch_env, get_env_obs_dim, get_env_action_dim
 from ppo import PPONetwork
 import time  # 添加这行导入
 

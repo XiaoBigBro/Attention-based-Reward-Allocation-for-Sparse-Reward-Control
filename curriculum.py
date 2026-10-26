@@ -9,7 +9,7 @@ from typing import Dict
 from collections import deque
 import numpy as np
 
-from fetchreach_env import NUM_CURRICULUM_LEVELS
+from env_fetchreach import NUM_CURRICULUM_LEVELS
 
 
 # --- SlidingWindowStats ---

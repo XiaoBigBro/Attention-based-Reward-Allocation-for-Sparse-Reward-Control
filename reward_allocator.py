@@ -28,7 +28,7 @@ class PositionalEncoding(nn.Module):
         PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
     """
 
-    def __init__(self, d_model: int, max_len: int = 200):
+    def __init__(self, d_model: int, max_len: int):
         super().__init__()
         # 创建位置编码矩阵 [max_len, d_model]
         pe = torch.zeros(max_len, d_model)
