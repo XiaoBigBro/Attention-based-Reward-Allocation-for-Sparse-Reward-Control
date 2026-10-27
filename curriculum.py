@@ -93,7 +93,7 @@ class AdaptiveCurriculumManager:
 
         mean_reward = self.reward_window.mean()
 
-        if mean_reward >= (self.promote_threshold - self.current_level * 10 ) and self.current_level < NUM_CURRICULUM_LEVELS - 1:
+        if mean_reward >= (self.promote_threshold - self.current_level * 20 ) and self.current_level < NUM_CURRICULUM_LEVELS - 1:
             return self._promote(mean_reward, self.promote_threshold)
 
         if mean_reward <= self.demote_threshold and self.current_level > 0:

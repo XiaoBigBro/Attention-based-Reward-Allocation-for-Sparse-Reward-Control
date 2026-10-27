@@ -102,7 +102,7 @@ class TrainingConfig:
     critic_lr3: float = 1e-4  # 课程学习等级3的价值网络学习率
 
     max_grad_norm: float = 0.5  # 最大梯度范数，防止梯度爆炸
-    value_clip_eps: float = 5.0  # 价值裁剪 epsilon，防止价值估计过拟合
+    value_clip_eps: float = 0.5  # 价值裁剪 epsilon，防止价值估计过拟合
     tau: float = 0.01  # 目标网络更新参数
 
     # level0中PPO 训练框架的参数
@@ -134,7 +134,7 @@ class TrainingConfig:
 
     # 课程学习
     curriculum_window_size: int = 50#课程学习窗口大小
-    curriculum_promote_threshold: float = 1000.0#课程学习提升阈值
+    curriculum_promote_threshold: float = 230.0#课程学习提升阈值
     curriculum_demote_threshold: float = 50.0#课程学习降级阈值
     curriculum_promote_cooldown: int = 200#课程学习提升冷却期
     curriculum_demote_cooldown: int = 100#课程学习降级冷却期
