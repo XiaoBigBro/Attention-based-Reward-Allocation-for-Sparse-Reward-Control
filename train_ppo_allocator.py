@@ -98,7 +98,7 @@ class TrainingConfig:
     actor_lr2: float = 3e-4  # 课程学习等级2的策略网络学习率
     critic_lr2: float = 1e-4  # 课程学习等级2的价值网络学习率
 
-    actor_lr3: float = 3e-4  # 课程学习等级3的策略网络学习率
+    actor_lr3: float = 1e-4  # 课程学习等级3的策略网络学习率
     critic_lr3: float = 1e-4  # 课程学习等级3的价值网络学习率
 
     max_grad_norm: float = 0.5  # 最大梯度范数，防止梯度爆炸
@@ -133,10 +133,10 @@ class TrainingConfig:
     alloc_lr1: float = 1e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
 
     # 课程学习
-    curriculum_window_size: int = 50#课程学习窗口大小
+    curriculum_window_size: int = 100#课程学习窗口大小
     curriculum_promote_threshold: float = 230.0#课程学习提升阈值
     curriculum_demote_threshold: float = 50.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 200#课程学习提升冷却期
+    curriculum_promote_cooldown: int = 100#课程学习提升冷却期
     curriculum_demote_cooldown: int = 100#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
