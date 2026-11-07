@@ -31,9 +31,9 @@ class EnvCurriculumParams:
     dense_reward: bool = True#是否使用密集奖励模式
 
 CURRICULUM_PRESETS = {
-    0: EnvCurriculumParams(target_range=0.11, success_threshold=0.10,obj_range=0.08,max_episode_steps=80),
-    1: EnvCurriculumParams(target_range=0.12, success_threshold=0.09,obj_range=0.10,max_episode_steps=80),
-    2: EnvCurriculumParams(target_range=0.13, success_threshold=0.07,obj_range=0.12,max_episode_steps=80),
+    0: EnvCurriculumParams(target_range=0.10, success_threshold=0.07,obj_range=0.10,max_episode_steps=80),
+    1: EnvCurriculumParams(target_range=0.11, success_threshold=0.07,obj_range=0.11,max_episode_steps=80),
+    2: EnvCurriculumParams(target_range=0.13, success_threshold=0.06,obj_range=0.12,max_episode_steps=80),
     3: EnvCurriculumParams(target_range=0.15, success_threshold=0.05,obj_range=0.15,max_episode_steps=80),
 }
 
@@ -50,28 +50,22 @@ def compute_step_reward(
     threshold: float,
 ) -> float:
 
-    if cur_dist < threshold:
-        # 已到达目标区域：恒定保持奖励（区内微小位移不计 Δd）
-        return 3.0
-
-    #推动奖励
+    # 1) 推动奖励：推进为正、回拉为负（系数不对称，鼓励单向推动）
     delta_push = prev_dist - cur_dist
-    r_push = np.tanh( 200.0 * delta_push if delta_push >= 0 else 20.0 * delta_push)
+    r_push = np.tanh(200.0 * delta_push if delta_push >= 0 else 20.0 * delta_push)
 
-    #靠近奖励
-    if gripper_to_obj > 0.08:
-        delta_approach = prev_dist_girpper2obj - gripper_to_obj
-        r_approach = 0.3 * np.tanh(50.0*delta_approach)
+    # 2) 靠近奖励：不设门限，只奖励"比上一步更近"（取消原 0.08 门限，消除 6~8cm 无梯度区）
+    delta_approach = prev_dist_girpper2obj - gripper_to_obj
+    r_approach = 0.3 * np.tanh(50.0 * delta_approach)
+
+    # 3) 到位加成：0 ~ 0.5，在 threshold 处连续（cur_dist = threshold 时恰为 0）
+    #    取代原"到达即 return 3.0"的硬跳变与常数工资
+    if cur_dist <= threshold:
+        r_inplace = 0.5 * np.clip(1.0 - cur_dist / threshold, 0.0, 1.0)
     else:
-        r_approach = 0
+        r_inplace = 0.0
 
-    #接触奖励
-    if gripper_to_obj < 0.06:
-        r_contact = 0.2
-    else:
-        r_contact = 0
-
-    return 0.3 + r_push +r_contact +r_approach
+    return 1.3 + r_push + r_approach + r_inplace
 
 #最终奖励
 def compute_terminal_reward(
@@ -183,6 +177,7 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
             achieved = obs["achieved_goal"]
             desired = obs["desired_goal"]
             self._prev_dist = float(np.linalg.norm(achieved - desired))
+            self._prev_dist_girpper2onj = float(np.linalg.norm(obs["observation"][6:9]))
 
         return obs, info
 

@@ -50,12 +50,12 @@ def load_and_demo():
 
     # 4. 创建环境（支持渲染）
     print("正在创建环境...")
-    env = make_fetch_env("FetchPush-v4", curriculum_level=0, render_mode="human")
+    env = make_fetch_env("FetchPush-v3", curriculum_level=0, render_mode="human")
     print("✓ 环境创建成功")
 
     # 5. 获取环境维度
-    obs_dim = get_env_obs_dim("FetchPush-v4")
-    action_dim = get_env_action_dim("FetchPush-v4")
+    obs_dim = get_env_obs_dim("FetchPush-v3")
+    action_dim = get_env_action_dim("FetchPush-v3")
     print(f"环境维度 - 观测: {obs_dim}, 动作: {action_dim}")
 
     # 6. 创建网络结构（必须和训练时完全一致）

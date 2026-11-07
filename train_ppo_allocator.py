@@ -30,6 +30,7 @@ from reward_allocator import RewardAllocatorAgent, RewardAllocatorConfig
 #更改环境库里面物块生成区域采样的阈值
 from gymnasium_robotics.envs.fetch.fetch_env import MujocoFetchEnv
 
+#Fetchpush环境的参数
 def _patched_reset_sim(self):
     # Reset buffers for joint states, actuators, warm-start, control buffers etc.
     self._mujoco.mj_resetData(self.model, self.data)
@@ -43,7 +44,7 @@ def _patched_reset_sim(self):
     # Randomize start position of object.
     if self.has_object:
         object_xpos = self.initial_gripper_xpos[:2]
-        while np.linalg.norm(object_xpos - self.initial_gripper_xpos[:2]) < 0.06:  # 原值0.10
+        while np.linalg.norm(object_xpos - self.initial_gripper_xpos[:2]) < 0.08:  # 原值0.10
             object_xpos = self.initial_gripper_xpos[:2] + self.np_random.uniform(
                 -self.obj_range, self.obj_range, size=2
             )
@@ -69,36 +70,40 @@ MujocoFetchEnv._reset_sim = _patched_reset_sim
 class TrainingConfig:
     """训练配置：包含所有可调超参数，供 PPOTrainerWithAllocator 使用"""
     # 环境
-    env_id: str = "FetchPush-v4"
+    env_id: str = "FetchPush-v3"
     seed: int = 888
 
     # PPO actor网络参数
     hidden_dims: List[int] = field(default_factory=lambda: [256, 128])  # 策略网络隐藏层维度
     log_std_min: float = -2.0#策略网络log标准差最小值
-    log_std_max: float = 1.0#策略网络log标准差最大值
-    log_std_init: float = 0.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
+    log_std_max: float = 0.0#策略网络log标准差最大值（std 上限 1.0，不得超过动作量程）
+    log_std_init: float = -0.5#策略网络log标准差初始值，控制策略的初始探索程度。std=exp(log_std)实际标准差
 
     # PPO 训练的超参数
 
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
-    lam: float = 0.9#GAE参数
-    clip_eps: float = 0.1#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.05  # 熵正则化系数
+    lam: float = 0.95#GAE参数
+    clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
+    entropy_coef: float = 0.003  # 熵正则化系数（0.001 会使熵塌到 ~0，0.005 会爆到 4.5）
+
+    # 奖励缩放：FetchPush 单回合回报上限约 168，缩放后落在 O(3~8)，
+    # critic 才学得动（不缩放时 smooth_l1 目标量级 150+，且与 value_clip_eps 严重失配）
+    reward_scale: float = 0.05
 
     actor_lr0: float = 3e-4  # 策略网络学习率
-    critic_lr0: float = 3e-4  # 价值网络学习率
+    critic_lr0: float = 1e-4  # 价值网络学习率
 
-    actor_lr1: float = 1e-4#课程学习等级1的策略网络学习率
+    actor_lr1: float = 3e-4#课程学习等级1的策略网络学习率
     critic_lr1: float = 1e-4#课程学习等级1的价值网络学习率
 
-    actor_lr2: float = 1e-4  # 课程学习等级2的策略网络学习率
+    actor_lr2: float = 3e-4  # 课程学习等级2的策略网络学习率
     critic_lr2: float = 1e-4  # 课程学习等级2的价值网络学习率
 
-    actor_lr3: float = 1e-4  # 课程学习等级3的策略网络学习率
+    actor_lr3: float = 3e-4  # 课程学习等级3的策略网络学习率
     critic_lr3: float = 1e-4  # 课程学习等级3的价值网络学习率
 
-    max_grad_norm: float = 0.5  # 最大梯度范数，防止梯度爆炸
-    value_clip_eps: float = 0.2  # 价值裁剪 epsilon，防止价值估计过拟合
+    max_grad_norm: float = 1.0  # 最大梯度范数，防止梯度爆炸
+    value_clip_eps: float = 2.0  # 价值裁剪 epsilon（回报缩放后量级 ~8，0.5 会锁死 critic）
     tau: float = 0.01  # 目标网络更新参数
 
     # level0中PPO 训练框架的参数
@@ -106,14 +111,14 @@ class TrainingConfig:
     ppo_epochs: int = 4 #每批数据训练多少次
     ppo_update_interval: int = 50 #收集多少回合再进行训练
     critic_updates_per_epoch: int = 2 #level0里面，价值网络额外更新的次数
-    mini_batch_size = 1024
+    mini_batch_size = 512
 
     # 奖励分配网络初始化超参数
     alloc_d_model: int = 64#奖励分配网络隐藏层维度
     alloc_num_heads: int = 4#奖励分配网络头数
     alloc_num_layers: int = 2#奖励分配网络层数
     alloc_d_ff: int = 128#奖励分配网络前馈网络隐藏层维度，如果分配网络学得慢，可以调大
-    alloc_dropout: float = 0.2#奖励分配网络dropout率
+    alloc_dropout: float = 0.1#奖励分配网络dropout率（0.2 会让权重 w 在训练/推理间抖动 20%）
     max_seq_len: int = 100#奖励分配网络最大序列长度
 
     # 分配网络level0模仿训练参数
@@ -121,7 +126,7 @@ class TrainingConfig:
     # 0.1 会 softmax 塌缩成 one-hot（权重全给最高奖励步，推进步信号消失）；
     # 0.5 时 target 为"保持>推进>后退"（约 148:20:2.7），可学且梯度足够强（比 1.0 强约 10 倍）；
     # 1.0 时 target 太平坦（7.4:2.8:1），梯度被 80 维归一化稀释到 1e-5 量级，500 集也推不动。
-    imitation_lr: float = 1e-3#模仿训练学习率
+    imitation_lr: float = 3e-4#模仿训练学习率（1e-3 对 2 层小 Transformer 偏激进，100 epoch 易过拟合）
     imitation_batch_episodes: int = 512#模仿训练每批回合数（batch 维=回合，一次梯度更新）
     imitation_epochs: int = 100#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
     imitation_dataset_size: int = 1000#离线训练数据集大小（每 100 次训练时用当前 PPO 现采 N 回合组成固定数据集）
@@ -130,8 +135,8 @@ class TrainingConfig:
     alloc_lr1: float = 1e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
 
     # 课程学习
-    curriculum_window_size: int = 50#课程学习窗口大小
-    curriculum_promote_threshold: float = 500.0#课程学习提升阈值
+    curriculum_window_size: int = 100#课程学习窗口大小
+    curriculum_promote_threshold: float = 10000.0#课程学习提升阈值
     curriculum_demote_threshold: float = 50.0#课程学习降级阈值
     curriculum_promote_cooldown: int = 200#课程学习提升冷却期
     curriculum_demote_cooldown: int = 60#课程学习降级冷却期
@@ -375,7 +380,8 @@ class PPOTrainerWithAllocator:
         """计算 GAE 并构建训练缓冲区"""
         # 实际 transition 数 N (observations 有 N+1 个，包含 terminal state)
         N = len(buffer.observations) - 1#长度为N
-        allocated_rewards_list = allocated_rewards.tolist()
+        # 统一在此缩放：L0/L1/L2 三个分支的奖励都经过这里，一处生效
+        allocated_rewards_list = (allocated_rewards * self.config.reward_scale).tolist()
 
         observations = buffer.observations  # 长度 N+1: s_0, ..., s_N
 
