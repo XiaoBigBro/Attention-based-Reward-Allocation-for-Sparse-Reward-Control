@@ -48,24 +48,30 @@ def compute_step_reward(
     prev_dist_girpper2obj:float,
     gripper_to_obj :float,
     threshold: float,
+    align_score: float,#角度对齐分数
+    z_diff: float ,# 高度差分数
+
 ) -> float:
 
     # 1) 推动奖励：推进为正、回拉为负（系数不对称，鼓励单向推动）
     delta_push = prev_dist - cur_dist
-    r_push = np.tanh(200.0 * delta_push if delta_push >= 0 else 20.0 * delta_push)
+    r_push = np.tanh(100.0 * delta_push if delta_push >= 0 else 0.0 * delta_push)
 
-    # 2) 靠近奖励：不设门限，只奖励"比上一步更近"（取消原 0.08 门限，消除 6~8cm 无梯度区）
-    delta_approach = prev_dist_girpper2obj - gripper_to_obj
-    r_approach = 0.3 * np.tanh(50.0 * delta_approach)
-
-    # 3) 到位加成：0 ~ 0.5，在 threshold 处连续（cur_dist = threshold 时恰为 0）
-    #    取代原"到达即 return 3.0"的硬跳变与常数工资
-    if cur_dist <= threshold:
-        r_inplace = 0.5 * np.clip(1.0 - cur_dist / threshold, 0.0, 1.0)
+    # 2) 靠近奖励：不设门限，只奖励"比上一步更近"
+    if gripper_to_obj >= 0.08:
+        delta_approach = prev_dist_girpper2obj - gripper_to_obj
+        r_approach = 0.3 * np.tanh(50.0 * delta_approach if delta_approach >= 0 else 0.0 * delta_approach)
     else:
-        r_inplace = 0.0
+        if z_diff > 0.05:
+            r_approach = 0.1 * align_score
+        else:
+            # 方向完美 + 高度合适 = 拿到满额引导分
+            r_approach = 0.5 * align_score
 
-    return 1.3 + r_push + r_approach + r_inplace
+    if cur_dist <= threshold:
+        return 2.0
+
+    return r_push + r_approach+ 0.05
 
 #最终奖励
 def compute_terminal_reward(
@@ -156,6 +162,26 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         self._prev_dist = None
         self._prev_dist_girpper2onj = None
 
+    #计算方向
+    def _calc_align_score(self, gripper_pos, block_pos, target_pos):
+        # 向量1：从物块指向夹爪
+        vec_BG = gripper_pos - block_pos
+        # 向量2：从物块指向目标
+        vec_BT = target_pos - block_pos
+
+        # 计算单位向量
+        norm_BG = np.linalg.norm(vec_BG) + 1e-6
+        norm_BT = np.linalg.norm(vec_BT) + 1e-6
+        unit_BG = vec_BG / norm_BG
+        unit_BT = vec_BT / norm_BT
+
+        # 余弦相似度：范围 [-1, 1]。如果是 -1，说明两向量完全反向（即夹爪在物块的正后方，推的方向完美）
+        cos_sim = np.dot(unit_BG, unit_BT)
+
+        # 映射到 0~1 的分数
+        align_score = float(np.clip(-cos_sim, 0.0, 1.0))
+        return align_score
+
     # ------------------------------------------------------------------
     # gym.Wrapper 覆写
     # ------------------------------------------------------------------
@@ -165,9 +191,15 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         # 先同步 target_range，再 reset（确保本回合目标按新参数采样）
         self._sync_target_range()
         obs, info = self.env.reset(**kwargs)
+
         # 增量式奖励需要初始距离 d(s_0)（回合起点）
-        achieved = obs["achieved_goal"]
-        desired = obs["desired_goal"]
+        achieved = obs["achieved_goal"]#物块位置
+        desired = obs["desired_goal"]#目标位置
+        # girpper = obs["observation"][0:3]
+        #
+        # #角度对齐分数
+        # align_score = self._calc_align_score(girpper,achieved,desired)
+
         self._prev_dist = float(np.linalg.norm(achieved - desired))
         self._prev_dist_girpper2onj = float(np.linalg.norm(obs["observation"][6:9]))
 
@@ -176,6 +208,10 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
             # 增量式奖励需要初始距离 d(s_0)（回合起点）
             achieved = obs["achieved_goal"]
             desired = obs["desired_goal"]
+            # girpper = obs["observation"][0:3]
+            # # 角度对齐分数
+            # align_score = self._calc_align_score(girpper, achieved, desired)
+
             self._prev_dist = float(np.linalg.norm(achieved - desired))
             self._prev_dist_girpper2onj = float(np.linalg.norm(obs["observation"][6:9]))
 
@@ -189,6 +225,14 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
         # 计算当前末端到目标的距离
         achieved = obs["achieved_goal"]#物块位置
         desired = obs["desired_goal"]#目标区域位置
+
+        girpper = obs["observation"][0:3]#爪子的位置
+        # 角度对齐分数
+        align_score = self._calc_align_score(girpper, achieved, desired)
+
+        # 2. 算高度差（只看 Z 轴，防止悬空推）
+        z_diff = abs(girpper[2] - achieved[2])
+
         gripper_to_obj = float(np.linalg.norm(obs["observation"][6:9]))#机械臂与物块的距离
         cur_dist = float(np.linalg.norm(achieved - desired))
 
@@ -199,7 +243,10 @@ class EpisodicDwellRewardWrapper(gym.Wrapper):
             prev_dist_girpper2obj = self._prev_dist_girpper2onj,#上次机械臂与物块的距离
             gripper_to_obj = gripper_to_obj,#这次机械臂与物块的距离
             threshold = self._params.success_threshold,#判定成功的范围
+            align_score =align_score,#角度对齐的分数
+            z_diff=z_diff,
         )
+
         self._prev_dist = cur_dist
         self._prev_dist_girpper2onj = gripper_to_obj
 

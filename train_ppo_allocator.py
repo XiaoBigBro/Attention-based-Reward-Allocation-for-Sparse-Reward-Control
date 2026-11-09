@@ -145,7 +145,7 @@ class TrainingConfig:
     # 训练流程
     total_episodes: int = 50000
     log_interval: int = 10#日志间隔
-    save_interval: int = 200#保存间隔
+    save_interval: int = 500#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
     device: str = "cuda" if torch.cuda.is_available() else "cpu"  # 设备（自动检测）
 
