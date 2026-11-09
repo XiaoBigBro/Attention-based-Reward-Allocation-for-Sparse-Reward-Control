@@ -24,11 +24,10 @@ NUM_CURRICULUM_LEVELS = 4  # 等级 0.1.2.3，其中0为密集奖励模式，1.2
 @dataclass
 class EnvCurriculumParams:
     """控制难度的参数（单位：米）。"""
-    obj_range :float = 0.08 #物块出生地的范围大小
-    success_threshold: float = 0.10  #成功判定距离
-    target_range: float = 0.11#目标区出生地的范围大小
+    obj_range :float = 0.10 #物块出生地的范围大小
+    success_threshold: float = 0.07  #成功判定距离
+    target_range: float = 0.10#目标区出生地的范围大小
     max_episode_steps: int = 80#最大回合步数
-    dense_reward: bool = True#是否使用密集奖励模式
 
 CURRICULUM_PRESETS = {
     0: EnvCurriculumParams(target_range=0.10, success_threshold=0.07,obj_range=0.10,max_episode_steps=80),

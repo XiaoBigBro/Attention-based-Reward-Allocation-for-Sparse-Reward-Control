@@ -119,7 +119,7 @@ class TrainingConfig:
     alloc_num_layers: int = 2#奖励分配网络层数
     alloc_d_ff: int = 128#奖励分配网络前馈网络隐藏层维度，如果分配网络学得慢，可以调大
     alloc_dropout: float = 0.1#奖励分配网络dropout率（0.2 会让权重 w 在训练/推理间抖动 20%）
-    max_seq_len: int = 100#奖励分配网络最大序列长度
+    max_seq_len: int = 85#奖励分配网络最大序列长度
 
     # 分配网络level0模仿训练参数
     temperature: float = 0.7#模仿训练温度，决定密集奖励的分布是更尖锐（集中）还是更平坦（均匀）。
@@ -129,21 +129,20 @@ class TrainingConfig:
     imitation_lr: float = 3e-4#模仿训练学习率（1e-3 对 2 层小 Transformer 偏激进，100 epoch 易过拟合）
     imitation_batch_episodes: int = 512#模仿训练每批回合数（batch 维=回合，一次梯度更新）
     imitation_epochs: int = 100#模仿训练 epoch 数（每 epoch 打乱 500 回合重新分批；50×25批=1250 梯度步达标）
-    imitation_dataset_size: int = 1000#离线训练数据集大小（每 100 次训练时用当前 PPO 现采 N 回合组成固定数据集）
 
     #奖励分配网络level1训练参数
     alloc_lr1: float = 1e-4  # 奖励分配网络学习率，如果分配网络的损失不降或震荡，可以降到 3e-4 或 1e-4。
 
     # 课程学习
     curriculum_window_size: int = 100#课程学习窗口大小
-    curriculum_promote_threshold: float = 10000.0#课程学习提升阈值
-    curriculum_demote_threshold: float = 50.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 200#课程学习提升冷却期
+    curriculum_promote_threshold: float = 110.0#课程学习提升阈值
+    curriculum_demote_threshold: float = 20.0#课程学习降级阈值
+    curriculum_promote_cooldown: int = 100#课程学习提升冷却期
     curriculum_demote_cooldown: int = 60#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
     # 训练流程
-    total_episodes: int = 50000
+    total_episodes: int = 5000
     log_interval: int = 10#日志间隔
     save_interval: int = 500#保存间隔
     save_dir: str = "./checkpoints/seed{seed}"#保存目录，只是普通的字符串
