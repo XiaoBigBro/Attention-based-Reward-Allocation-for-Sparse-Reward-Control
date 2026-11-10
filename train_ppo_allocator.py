@@ -99,7 +99,7 @@ class TrainingConfig:
     actor_lr2: float = 3e-4  # 课程学习等级2的策略网络学习率
     critic_lr2: float = 1e-4  # 课程学习等级2的价值网络学习率
 
-    actor_lr3: float = 3e-4  # 课程学习等级3的策略网络学习率
+    actor_lr3: float = 1e-4  # 课程学习等级3的策略网络学习率
     critic_lr3: float = 1e-4  # 课程学习等级3的价值网络学习率
 
     max_grad_norm: float = 1.0  # 最大梯度范数，防止梯度爆炸
@@ -135,9 +135,9 @@ class TrainingConfig:
 
     # 课程学习
     curriculum_window_size: int = 100#课程学习窗口大小
-    curriculum_promote_threshold: float = 110.0#课程学习提升阈值
+    curriculum_promote_threshold: float = 120.0#课程学习提升阈值
     curriculum_demote_threshold: float = 20.0#课程学习降级阈值
-    curriculum_promote_cooldown: int = 100#课程学习提升冷却期
+    curriculum_promote_cooldown: int = 200#课程学习提升冷却期
     curriculum_demote_cooldown: int = 60#课程学习降级冷却期
     curriculum_level: int = 0#课程学习初始等级
 
@@ -581,7 +581,7 @@ class PPOTrainerWithAllocator:
         # ---------- 2~4. 多 epoch mini-batch 训练 ----------
         total_kl, total_mse, total_steps = 0.0, 0.0, 0
 
-        while epoch < self.config.imitation_epochs*3 :
+        while epoch < self.config.imitation_epochs*5 :
 
             self.allocator_agent.network.train()
             order = np.random.permutation(n_train)  # 每 epoch 重新打乱
@@ -638,7 +638,7 @@ class PPOTrainerWithAllocator:
             print(f"Epoch {epoch}/{self.config.imitation_epochs}: "
                   f"mse={total_mse/total_steps:.4f}, corr={w_rew_corr:.4f}")
 
-            if epoch >= self.config.imitation_epochs and w_rew_corr > 0.85:
+            if epoch >= self.config.imitation_epochs and w_rew_corr > 0.90:
                 print(f"✅ 训练完成：epoch={epoch}, corr={w_rew_corr:.4f}")
                 break
 
