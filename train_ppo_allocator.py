@@ -70,7 +70,7 @@ MujocoFetchEnv._reset_sim = _patched_reset_sim
 class TrainingConfig:
     """训练配置：包含所有可调超参数，供 PPOTrainerWithAllocator 使用"""
     # 环境
-    env_id: str = "FetchPush-v3"
+    env_id: str = "FetchPush-v4"
     seed: int = 888
 
     # PPO actor网络参数
@@ -84,7 +84,7 @@ class TrainingConfig:
     gamma: float = 0.99  # 折扣因子,控制未来奖励的权重
     lam: float = 0.95#GAE参数
     clip_eps: float = 0.2#PPO裁剪参数,控制策略更新的稳定性.
-    entropy_coef: float = 0.003  # 熵正则化系数（0.001 会使熵塌到 ~0，0.005 会爆到 4.5）
+    entropy_coef: float = 0.001  # 熵正则化系数（0.001 会使熵塌到 ~0，0.005 会爆到 4.5）
 
     # 奖励缩放：FetchPush 单回合回报上限约 168，缩放后落在 O(3~8)，
     # critic 才学得动（不缩放时 smooth_l1 目标量级 150+，且与 value_clip_eps 严重失配）
